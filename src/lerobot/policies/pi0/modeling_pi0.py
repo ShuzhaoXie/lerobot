@@ -1168,7 +1168,12 @@ class PI0Policy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training."""
-
+        # print('batch')
+        # for k, v in batch.items():
+        #     if isinstance(v, torch.Tensor):
+        #         print(k, v.shape)
+        #     else:
+        #         print(k, v)
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
         lang_tokens, lang_masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
