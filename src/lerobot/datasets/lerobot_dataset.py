@@ -162,6 +162,7 @@ class LeRobotDatasetMetadata:
         self.tasks = load_tasks(self.root)
         self.episodes = load_episodes(self.root)
         self.stats = load_stats(self.root)
+        # import pdb;pdb.set_trace()
 
     def pull_from_repo(
         self,
@@ -704,6 +705,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 raise FileNotFoundError
             self.hf_dataset = self.load_hf_dataset()
             # Check if cached dataset contains all requested episodes
+            # print("Cached episodes:", self.hf_dataset["episode_index"])
+            # print("Requested episodes:", self.episodes)
             if not self._check_cached_episodes_sufficient():
                 raise FileNotFoundError("Cached dataset doesn't contain all requested episodes")
         except (AssertionError, FileNotFoundError, NotADirectoryError):

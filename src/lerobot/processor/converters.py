@@ -349,7 +349,8 @@ def batch_to_transition(batch: dict[str, Any]) -> EnvTransition:
         raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
 
     # Extract observation and complementary data keys.
-    observation_keys = {k: v for k, v in batch.items() if k.startswith(OBS_PREFIX)}
+    # add cam, by ShuzhaoXie
+    observation_keys = {k: v for k, v in batch.items() if k.startswith(OBS_PREFIX) or k.startswith('cam')}
     complementary_data = _extract_complementary_data(batch)
 
     return create_transition(

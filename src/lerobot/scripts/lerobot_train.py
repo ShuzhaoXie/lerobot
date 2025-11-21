@@ -18,7 +18,7 @@ import time
 from contextlib import nullcontext
 from pprint import pformat
 from typing import Any
-
+from tqdm import tqdm
 import torch
 from accelerate import Accelerator
 from termcolor import colored
@@ -205,7 +205,11 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         ds_meta=dataset.meta,
         rename_map=cfg.rename_map,
     )
-
+    # if is_main_process:
+    #     with open('model_name.txt', 'w') as f:
+    #         for name, _ in policy.model.named_parameters():
+    #             f.write(f'{name}\n')
+    
     # Wait for all processes to finish policy creation before continuing
     accelerator.wait_for_everyone()
 
@@ -323,10 +327,16 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if is_main_process:
         logging.info("Start offline training on a fixed dataset")
 
-    for _ in range(step, cfg.steps):
+    for _ in tqdm(range(step, cfg.steps)):
         start_time = time.perf_counter()
         batch = next(dl_iter)
         # import pdb; pdb.set_trace()
+        # print('before preprocess, batch')
+        # for k, v in batch.items():
+        #     if isinstance(v, torch.Tensor):
+        #         print(k, v.shape)
+        #     else:
+        #         print(k, v)
         batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 

@@ -1070,10 +1070,10 @@ class PI0Policy(PreTrainedPolicy):
 
         # Get device from model parameters
         device = next(self.parameters()).device
-
+        # print('self.config.image_features', self.config.image_features)
         present_img_keys = [key for key in self.config.image_features if key in batch]
         missing_img_keys = [key for key in self.config.image_features if key not in batch]
-
+        # print(present_img_keys)
         if len(present_img_keys) == 0:
             raise ValueError(
                 f"All image features are missing from the batch. At least one expected. "
@@ -1168,7 +1168,7 @@ class PI0Policy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training."""
-        # print('batch')
+        # print('after preprocess, batch')
         # for k, v in batch.items():
         #     if isinstance(v, torch.Tensor):
         #         print(k, v.shape)

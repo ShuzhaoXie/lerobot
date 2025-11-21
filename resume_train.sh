@@ -1,19 +1,20 @@
 REPOID=2025-11-12
 TIME=$(date +"%Y_%m_%d_%H_%M_%S")
-
-CUDA_VISIBLE_DEVICES=4 python src/lerobot/scripts/lerobot_train.py \
+RESUMEDIR=/home/szxie/storage/lerobot/outputs/pi0_training_v2/2025_11_20_14_54_58/checkpoints/last
+CUDA_VISIBLE_DEVICES=3 python src/lerobot/scripts/lerobot_train.py \
     --dataset.repo_id=$REPOID \
     --dataset.root=/home/szxie/storage/lerobot/data/baked/$REPOID \
     --policy.type=pi0 \
     --job_name=pi0_training \
-    --policy.pretrained_path=lerobot/pi0_base \
+    --policy.pretrained_path=$RESUMEDIR \
     --output_dir=./outputs/pi0_training_v2/$TIME \
     --policy.repo_id=$REPOID\_test \
     --policy.compile_model=true \
     --policy.gradient_checkpointing=true \
     --policy.dtype=bfloat16 \
-    --steps=1 \
+    --steps=90000 \
     --policy.device=cuda \
     --batch_size=8 \
+    --resume=true \
     --wandb.enable=true \
-    --policy.optimizer_lr=5e-4
+    --config_path=$RESUMEDIR/pretrained_model/train_config.json

@@ -309,7 +309,8 @@ class DataProcessorPipeline(HubMixin, Generic[TInput, TOutput]):
                 hook(idx, transition)
 
             transition = processor_step(transition)
-
+            # print('transition.keys()', transition.keys())
+            # import pdb; pdb.set_trace()
             # Execute post-hooks
             for hook in self.after_step_hooks:
                 hook(idx, transition)
