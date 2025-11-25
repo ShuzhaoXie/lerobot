@@ -1,6 +1,6 @@
 import pandas as pd
 
-df = pd.read_parquet("/home/szxie/storage/lerobot/data/baked/2025-11-12_p1/meta/tasks.parquet")
+df = pd.read_parquet("/home/szxie/storage/lerobot/data/baked/2025-11-12_joint6_t2/meta/tasks.parquet")
 # 打印原始 index，看一下它是什么
 print("OLD INDEX:", df.index)
 
@@ -12,4 +12,4 @@ df.index = [new_task]
 print(df)
 
 # 如果你想保存回 parquet
-df.to_parquet("/home/szxie/storage/lerobot/data/baked/2025-11-12_p1/meta/tasks.parquet")
+df.to_parquet("/home/szxie/storage/lerobot/data/baked/2025-11-12_joint6_t2/meta/tasks.parquet")

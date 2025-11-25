@@ -2,6 +2,11 @@
 """
 Direct conversion from ABB raw data to LeRobot Dataset v3.0 format.
 Combines logic from abb->v2.0 and v2.1->v3.0 conversion scripts.
+
+Fixed version:
+1. Correct stats.json format
+2. Continuous episode indices (re-indexed after dropping invalid episodes)
+3. Both action and state are 6D joint values
 """
 
 import os
@@ -27,6 +32,13 @@ DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_DATA_PATH = "data/chunk-{chunk_index:03d}/file_{file_index:03d}.parquet"
 DEFAULT_VIDEO_PATH = "videos/{video_key}/chunk-{chunk_index:03d}/file_{file_index:03d}.mp4"
 
+
+# if dataset_type: joint6
+OBS_NAMES=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'gripper']
+ACTION_NAMES=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'gripper']
+# dataset_type: full14
+OBS_NAMES=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6',  'gripper']
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
@@ -35,7 +47,7 @@ def check_ffmpeg():
     try:
         result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
         if result.returncode == 0:
-            return 'ffmpeg'  # Fixed: return string 'ffmpeg' instead of True
+            return 'ffmpeg'
     except FileNotFoundError:
         pass
     
@@ -156,96 +168,55 @@ def parse_action_states(action_json_path: Path) -> List[Dict]:
         if not isinstance(st, dict):
             continue
         joint = st.get('joint')
-        ee_position = st.get('ee_position')
-        ee_quaternion = st.get('ee_quaternion')
         gripper = st.get('gripper')
         
-        if joint is None or ee_position is None or ee_quaternion is None or gripper is None:
+        if joint is None:
             continue
         if not isinstance(joint, list) or len(joint) != 6:
             continue
-        if not isinstance(ee_position, list) or len(ee_position) != 3:
-            continue
-        if not isinstance(ee_quaternion, list) or len(ee_quaternion) != 4:
-            continue
-            
-        if isinstance(gripper, str):
+        
+        # Parse gripper: "on" -> 1.0, "off" -> 0.0
+        if gripper is None:
+            g = 0.0
+        elif isinstance(gripper, str):
             g = 1.0 if gripper.lower() == 'on' else 0.0
         else:
             try:
                 g = float(gripper)
             except Exception:
-                continue
-                
+                g = 0.0
+            
         result.append({
             'joint': np.array(list(map(float, joint)), dtype=np.float32),
-            'ee_position': np.array(list(map(float, ee_position)), dtype=np.float32),
-            'ee_quaternion': np.array(list(map(float, ee_quaternion)), dtype=np.float32),
-            'gripper': g
+            'gripper': g,
         })
     return result
-
-
-def preprocess_ee_position(ee_positions: List[np.ndarray]) -> List[np.ndarray]:
-    """Preprocess ee_position: divide by 100, compute frame differences."""
-    if len(ee_positions) == 0:
-        return []
-    
-    normalized_positions = [pos / 100.0 for pos in ee_positions]
-    processed_positions = []
-    
-    for i in range(len(normalized_positions)):
-        if i == len(normalized_positions) - 1:
-            processed_positions.append(np.zeros(3, dtype=np.float32))
-        else:
-            diff = normalized_positions[i + 1] - normalized_positions[i]
-            processed_positions.append(diff)
-    
-    return processed_positions
-
-
-def preprocess_ee_quaternion(ee_quaternions: List[np.ndarray]) -> List[np.ndarray]:
-    """Preprocess ee_quaternion: compute frame differences."""
-    if len(ee_quaternions) == 0:
-        return []
-    
-    processed_quaternions = []
-    for i in range(len(ee_quaternions)):
-        if i == len(ee_quaternions) - 1:
-            processed_quaternions.append(np.zeros(4, dtype=np.float32))
-        else:
-            diff = ee_quaternions[i + 1] - ee_quaternions[i]
-            processed_quaternions.append(diff)
-    
-    return processed_quaternions
-
-
-def update_chunk_file_indices(chunk_idx: int, file_idx: int, chunk_size: int) -> Tuple[int, int]:
-    """Update chunk and file indices."""
-    file_idx += 1
-    if file_idx >= chunk_size:
-        chunk_idx += 1
-        file_idx = 0
-    return chunk_idx, file_idx
 
 
 class EpisodeData:
     """Container for episode data."""
     def __init__(self, episode_index: int, episode_dir: Path):
-        self.episode_index = episode_index
+        self.episode_index = episode_index  # This will be the NEW continuous index
         self.episode_dir = episode_dir
         self.states_data = []
         self.cam0_temp_path = None
         self.cam1_temp_path = None
         self.num_frames = 0
         self.fps = 0.0
-        self.observations = []
-        self.actions = []
+        self.observations = []  # 6D joint state
+        self.actions = []       # 6D joint action (same as state, or shifted)
         self.timestamps = []
         
 
 def process_raw_episode(episode_dir: Path, episode_index: int, temp_dir: Path, fps_rational: str) -> EpisodeData:
-    """Process a single raw episode directory."""
+    """Process a single raw episode directory.
+    
+    Args:
+        episode_dir: Path to the raw episode directory
+        episode_index: The NEW continuous index for this episode
+        temp_dir: Temporary directory for re-encoded videos
+        fps_rational: Target FPS as rational number
+    """
     ep_data = EpisodeData(episode_index, episode_dir)
     
     # Find video files
@@ -286,15 +257,14 @@ def process_raw_episode(episode_dir: Path, episode_index: int, temp_dir: Path, f
         logging.warning(f"Skipped {episode_dir.name}: no valid states in action.json")
         return None
     
-    # Preprocess data
-    ee_positions = [state['ee_position'] for state in states_data]
-    processed_ee_positions = preprocess_ee_position(ee_positions)
-    
-    ee_quaternions = [state['ee_quaternion'] for state in states_data]
-    processed_ee_quaternions = preprocess_ee_quaternion(ee_quaternions)
-    
+    # Extract joints and grippers
     joints = [state['joint'] for state in states_data]
     grippers = [state['gripper'] for state in states_data]
+    
+    # Log gripper distribution for debugging
+    on_count = sum(1 for g in grippers if g == 1.0)
+    off_count = sum(1 for g in grippers if g == 0.0)
+    logging.debug(f"{episode_dir.name}: gripper on={on_count}, off={off_count}")
     
     # Re-encode videos to temp directory
     ep_data.cam0_temp_path = temp_dir / f'cam0_ep{episode_index:06d}.mp4'
@@ -325,32 +295,27 @@ def process_raw_episode(episode_dir: Path, episode_index: int, temp_dir: Path, f
     # Skip first frame and align
     use_num = max_aligned - 1
     joints = joints[:max_aligned][1:]
-    processed_ee_positions = processed_ee_positions[:max_aligned][1:]
-    processed_ee_quaternions = processed_ee_quaternions[:max_aligned][1:]
     grippers = grippers[:max_aligned][1:]
     
     ep_data.fps = float(info0.get('fps', 0.0)) or (50.0/3.0)
+    # (o_0, a_1), so skip a_0
     ep_data.num_frames = use_num - 1
     
     # Generate timestamps
     timestamps = (np.arange(use_num, dtype=np.float32) / np.float32(ep_data.fps))
     
-    # Build observations and actions
+    # Build observations and actions (both are 7D: joint + gripper)
     for frame_idx in range(use_num - 1):
-        state6 = joints[frame_idx]
-        action8 = joints[frame_idx + 1]
+        # 7D state: 6 joint angles + 1 gripper
+        state7 = np.concatenate([joints[frame_idx], [grippers[frame_idx]]], dtype=np.float32)
+        # 7D action: same as state
+        action7 = np.concatenate([joints[frame_idx+1], [grippers[frame_idx+1]]], dtype=np.float32)
         
-        # np.concatenate([
-        #     processed_ee_positions[frame_idx],
-        #     processed_ee_quaternions[frame_idx],
-        #     [grippers[frame_idx]]
-        # ], dtype=np.float32)
-        
-        ep_data.observations.append(state6)
-        ep_data.actions.append(action8)
+        ep_data.observations.append(state7)
+        ep_data.actions.append(action7)
         ep_data.timestamps.append(float(timestamps[frame_idx]))
     
-    logging.info(f"✓ Processed {episode_dir.name}: {use_num} frames @ {ep_data.fps:.2f} fps")
+    logging.info(f"✓ Processed {episode_dir.name} -> episode_{episode_index}: {ep_data.num_frames} frames @ {ep_data.fps:.2f} fps")
     return ep_data
 
 
@@ -358,7 +323,9 @@ def write_combined_data_file(episodes: List[EpisodeData], output_dir: Path, chun
     """Write combined data file for multiple episodes."""
     all_records = []
     
-    for ep_data in episodes:
+    # jsonl_path = "episode0.jsonl"   # 你想写入的路径
+    
+    for idx, ep_data in enumerate(episodes):
         for i in range(ep_data.num_frames):
             record = {
                 'observation.state': ep_data.observations[i].tolist(),
@@ -369,6 +336,9 @@ def write_combined_data_file(episodes: List[EpisodeData], output_dir: Path, chun
                 'index': global_frame_offset + i,
                 'task_index': 0
             }
+            # if idx == 0:
+            #     with open(jsonl_path, "a") as f1:
+            #         f1.write(json.dumps(record) + "\n")
             all_records.append(record)
         global_frame_offset += ep_data.num_frames
     
@@ -381,10 +351,13 @@ def write_combined_data_file(episodes: List[EpisodeData], output_dir: Path, chun
 
 
 def write_combined_video_file(episodes: List[EpisodeData], output_dir: Path, camera_key: str, chunk_idx: int, file_idx: int):
-    """Write combined video file for multiple episodes."""
+    """Write combined video file for multiple episodes.
+    
+    camera_key should be the full feature key like 'observation.images.cam_0'
+    """
     video_paths = []
     for ep_data in episodes:
-        if camera_key == 'cam_0':
+        if 'cam_0' in camera_key:
             video_paths.append(ep_data.cam0_temp_path)
         else:
             video_paths.append(ep_data.cam1_temp_path)
@@ -419,6 +392,41 @@ def compute_episode_stats(observations: List[np.ndarray], actions: List[np.ndarr
     return stats
 
 
+def compute_global_stats(all_observations: List[np.ndarray], all_actions: List[np.ndarray]) -> Dict:
+    """Compute global statistics across all frames."""
+    obs_arr = np.array(all_observations)
+    act_arr = np.array(all_actions)
+    
+    stats = {
+        'observation.state': {
+            'mean': obs_arr.mean(axis=0).tolist(),
+            'std': obs_arr.std(axis=0).tolist(),
+            'min': obs_arr.min(axis=0).tolist(),
+            'max': obs_arr.max(axis=0).tolist(),
+        },
+        'action': {
+            'mean': act_arr.mean(axis=0).tolist(),
+            'std': act_arr.std(axis=0).tolist(),
+            'min': act_arr.min(axis=0).tolist(),
+            'max': act_arr.max(axis=0).tolist(),
+        },
+        # Image features need stats entries too (using standard image normalization values)
+        'observation.images.cam_0': {
+            'mean': [[[0.485]], [[0.456]], [[0.406]]],  # ImageNet mean (C, 1, 1)
+            'std': [[[0.229]], [[0.224]], [[0.225]]],   # ImageNet std (C, 1, 1)
+            'min': [[[0.0]], [[0.0]], [[0.0]]],
+            'max': [[[1.0]], [[1.0]], [[1.0]]],
+        },
+        'observation.images.cam_1': {
+            'mean': [[[0.485]], [[0.456]], [[0.406]]],
+            'std': [[[0.229]], [[0.224]], [[0.225]]],
+            'min': [[[0.0]], [[0.0]], [[0.0]]],
+            'max': [[[1.0]], [[1.0]], [[1.0]]],
+        },
+    }
+    return stats
+
+
 def flatten_dict(d: Dict, parent_key: str = '', sep: str = '.') -> Dict:
     """Flatten nested dictionary."""
     items = []
@@ -431,34 +439,13 @@ def flatten_dict(d: Dict, parent_key: str = '', sep: str = '.') -> Dict:
     return dict(items)
 
 
-def aggregate_stats(all_episode_stats: List[Dict]) -> Dict:
-    """Aggregate statistics across all episodes."""
-    keys = ['observation.state', 'action']
-    aggregated = {}
-    
-    for key in keys:
-        all_means = np.array([ep_stats[key]['mean'] for ep_stats in all_episode_stats])
-        all_stds = np.array([ep_stats[key]['std'] for ep_stats in all_episode_stats])
-        all_mins = np.array([ep_stats[key]['min'] for ep_stats in all_episode_stats])
-        all_maxs = np.array([ep_stats[key]['max'] for ep_stats in all_episode_stats])
-        
-        aggregated[key] = {
-            'mean': all_means.mean(axis=0).tolist(),
-            'std': np.sqrt((all_stds ** 2).mean(axis=0)).tolist(),
-            'min': all_mins.min(axis=0).tolist(),
-            'max': all_maxs.max(axis=0).tolist(),
-        }
-    
-    return aggregated
-
-
 def convert_abb_to_lerobot_v30(
     raw_data_dir: Path,
     output_dir: Path,
+    tasks: str,
     fps_rational: str = '50/3',
     data_file_size_in_mb: int = DEFAULT_DATA_FILE_SIZE_IN_MB,
-    video_file_size_in_mb: int = DEFAULT_VIDEO_FILE_SIZE_IN_MB,
-    tasks: str = r"Pick up the box on the conveyor belt and place it into the blue plastic bin."
+    video_file_size_in_mb: int = DEFAULT_VIDEO_FILE_SIZE_IN_MB
 ):
     """Main conversion function from ABB raw data to LeRobot v3.0."""
     
@@ -479,19 +466,30 @@ def convert_abb_to_lerobot_v30(
     temp_dir.mkdir(parents=True, exist_ok=True)
     
     # Find all episode directories
-    episode_dirs = sorted([d for d in raw_data_dir.iterdir() if d.is_dir()], key=lambda p: p.name)
+    # Support two modes:
+    # 1. If input dir itself is an episode (contains action.json), process it as single episode
+    # 2. If input dir contains subdirectories, treat each subdir as an episode
+    
+    if (raw_data_dir / 'action.json').exists():
+        # Mode 1: Input is a single episode directory
+        episode_dirs = [raw_data_dir]
+        logging.info(f"Input directory is a single episode (contains action.json)")
+    else:
+        # Mode 2: Input contains multiple episode subdirectories
+        episode_dirs = sorted([d for d in raw_data_dir.iterdir() if d.is_dir()], key=lambda p: p.name)
+    
     logging.info(f"Found {len(episode_dirs)} episode directories")
     
-    # Process all episodes
+    # Process all episodes with CONTINUOUS indexing
     all_episodes = []
-    skipped_episodes = []
+    continuous_index = 0  # This will be the new continuous episode index
     
-    for ep_idx, episode_dir in enumerate(tqdm.tqdm(episode_dirs, desc="Processing episodes")):
-        ep_data = process_raw_episode(episode_dir, ep_idx, temp_dir, fps_rational)
+    for episode_dir in tqdm.tqdm(episode_dirs, desc="Processing episodes"):
+        # Pass the continuous_index as the episode_index
+        ep_data = process_raw_episode(episode_dir, continuous_index, temp_dir, fps_rational)
         if ep_data is not None:
             all_episodes.append(ep_data)
-        else:
-            skipped_episodes.append(episode_dir.name)
+            continuous_index += 1  # Only increment when episode is successfully processed
     
     if len(all_episodes) == 0:
         logging.error("No valid episodes found!")
@@ -501,8 +499,7 @@ def convert_abb_to_lerobot_v30(
     logging.info("")
     logging.info(f"{'='*60}")
     logging.info(f"Successfully processed {len(all_episodes)}/{len(episode_dirs)} episodes")
-    if skipped_episodes:
-        logging.info(f"Skipped {len(skipped_episodes)} episodes")
+    logging.info(f"Episode indices: 0 to {len(all_episodes)-1} (continuous)")
     logging.info(f"{'='*60}")
     logging.info("")
     
@@ -522,8 +519,8 @@ def convert_abb_to_lerobot_v30(
     
     # Estimate sizes
     for ep_data in all_episodes:
-        # Estimate data size (rough: 8 bytes per float * 14 features * num_frames / 1MB)
-        est_data_size = (ep_data.num_frames * 14 * 8) / (1024 * 1024)
+        # Estimate data size (rough: 8 bytes per float * 12 features * num_frames / 1MB)
+        est_data_size = (ep_data.num_frames * 12 * 8) / (1024 * 1024)
         cam0_size = get_file_size_in_mb(ep_data.cam0_temp_path)
         cam1_size = get_file_size_in_mb(ep_data.cam1_temp_path)
         
@@ -579,17 +576,19 @@ def convert_abb_to_lerobot_v30(
                 'dataset_from_index': global_frame_offset,
                 'dataset_to_index': global_frame_offset + ep_data.num_frames,
             }
+            global_frame_offset += ep_data.num_frames
         
-        global_frame_offset = write_combined_data_file(
-            episodes, output_dir, chunk_idx, file_idx_in_chunk, global_frame_offset
-        )
+        # Reset global_frame_offset for write function
+        start_offset = episode_metadata[episodes[0].episode_index]['dataset_from_index']
+        write_combined_data_file(episodes, output_dir, chunk_idx, file_idx_in_chunk, start_offset)
     
     # Write video files for cam0
+    cam0_key = 'observation.images.cam_0'
     for file_idx, episodes in enumerate(tqdm.tqdm(cam0_video_file_episodes, desc="Writing cam0 videos")):
         chunk_idx = file_idx // DEFAULT_CHUNK_SIZE
         file_idx_in_chunk = file_idx % DEFAULT_CHUNK_SIZE
         
-        if not write_combined_video_file(episodes, output_dir, 'cam_0', chunk_idx, file_idx_in_chunk):
+        if not write_combined_video_file(episodes, output_dir, cam0_key, chunk_idx, file_idx_in_chunk):
             logging.error(f"Failed to write cam0 video file {chunk_idx}/{file_idx_in_chunk}")
         
         # Calculate timestamps for each episode in this video file
@@ -597,19 +596,20 @@ def convert_abb_to_lerobot_v30(
         for ep_data in episodes:
             ep_duration = ep_data.num_frames / ep_data.fps
             episode_metadata[ep_data.episode_index].update({
-                'videos/cam_0/chunk_index': chunk_idx,
-                'videos/cam_0/file_index': file_idx_in_chunk,
-                'videos/cam_0/from_timestamp': cumulative_duration,
-                'videos/cam_0/to_timestamp': cumulative_duration + ep_duration,
+                f'videos/{cam0_key}/chunk_index': chunk_idx,
+                f'videos/{cam0_key}/file_index': file_idx_in_chunk,
+                f'videos/{cam0_key}/from_timestamp': cumulative_duration,
+                f'videos/{cam0_key}/to_timestamp': cumulative_duration + ep_duration,
             })
             cumulative_duration += ep_duration
     
     # Write video files for cam1
+    cam1_key = 'observation.images.cam_1'
     for file_idx, episodes in enumerate(tqdm.tqdm(cam1_video_file_episodes, desc="Writing cam1 videos")):
         chunk_idx = file_idx // DEFAULT_CHUNK_SIZE
         file_idx_in_chunk = file_idx % DEFAULT_CHUNK_SIZE
         
-        if not write_combined_video_file(episodes, output_dir, 'cam_1', chunk_idx, file_idx_in_chunk):
+        if not write_combined_video_file(episodes, output_dir, cam1_key, chunk_idx, file_idx_in_chunk):
             logging.error(f"Failed to write cam1 video file {chunk_idx}/{file_idx_in_chunk}")
         
         # Calculate timestamps for each episode in this video file
@@ -617,17 +617,27 @@ def convert_abb_to_lerobot_v30(
         for ep_data in episodes:
             ep_duration = ep_data.num_frames / ep_data.fps
             episode_metadata[ep_data.episode_index].update({
-                'videos/cam_1/chunk_index': chunk_idx,
-                'videos/cam_1/file_index': file_idx_in_chunk,
-                'videos/cam_1/from_timestamp': cumulative_duration,
-                'videos/cam_1/to_timestamp': cumulative_duration + ep_duration,
+                f'videos/{cam1_key}/chunk_index': chunk_idx,
+                f'videos/{cam1_key}/file_index': file_idx_in_chunk,
+                f'videos/{cam1_key}/from_timestamp': cumulative_duration,
+                f'videos/{cam1_key}/to_timestamp': cumulative_duration + ep_duration,
             })
             cumulative_duration += ep_duration
     
     # Clean up temp directory
     shutil.rmtree(temp_dir)
     
-    # Compute statistics for each episode
+    # Collect all observations and actions for global stats
+    all_observations = []
+    all_actions = []
+    for ep_data in all_episodes:
+        all_observations.extend(ep_data.observations)
+        all_actions.extend(ep_data.actions)
+    
+    # Compute global statistics
+    global_stats = compute_global_stats(all_observations, all_actions)
+    
+    # Compute per-episode statistics
     all_episode_stats = []
     for ep_data in all_episodes:
         ep_stats = compute_episode_stats(ep_data.observations, ep_data.actions)
@@ -643,7 +653,7 @@ def convert_abb_to_lerobot_v30(
             'length': ep_data.num_frames,
             'meta/episodes/chunk_index': 0,
             'meta/episodes/file_index': 0,
-            **flatten_dict({'stats': all_episode_stats[idx]})  # Use idx instead of ep_idx
+            **flatten_dict({'stats': all_episode_stats[idx]})
         }
         episodes_records.append(record)
     
@@ -653,28 +663,33 @@ def convert_abb_to_lerobot_v30(
     df_episodes.to_parquet(episodes_path, index=False)
     logging.info(f"Written episodes metadata to {episodes_path}")
     
-    # Write aggregated stats
-    aggregated_stats = aggregate_stats(all_episode_stats)
-    df_stats = pd.DataFrame([flatten_dict(aggregated_stats)])
-    stats_path = output_dir / 'meta' / 'stats.parquet'
-    stats_path.parent.mkdir(parents=True, exist_ok=True)
-    df_stats.to_parquet(stats_path, index=False)
-    logging.info(f"Written aggregated stats to {stats_path}")
+    # Write stats.json (correct format)
+    stats_json_path = output_dir / 'meta' / 'stats.json'
+    stats_json_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(stats_json_path, 'w') as f:
+        json.dump(global_stats, f, indent=2)
+    logging.info(f"Written stats.json to {stats_json_path}")
+    
+    # Also write stats.parquet for compatibility
+    df_stats = pd.DataFrame([flatten_dict(global_stats)])
+    stats_parquet_path = output_dir / 'meta' / 'stats.parquet'
+    df_stats.to_parquet(stats_parquet_path, index=False)
+    logging.info(f"Written stats.parquet to {stats_parquet_path}")
     
     # Write tasks metadata
-    df_tasks = pd.DataFrame({
-        'task_index': [0],
-        'task': [tasks]
-    })
-    tasks_path = output_dir / 'meta' / 'tasks.parquet'  # 直接保存到 meta/tasks.parquet
+    df_tasks = pd.DataFrame(
+        {'task_index': [0]},
+        index=[tasks]
+    )
+    tasks_path = output_dir / 'meta' / 'tasks.parquet'
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
-    df_tasks.to_parquet(tasks_path, index=True)  # 保留索引（任务描述）
+    df_tasks.to_parquet(tasks_path, index=False)
     logging.info(f"Written tasks metadata to {tasks_path}")
     
     # Get video info from first episode
-    video_info = get_video_info(all_episodes[0].cam0_temp_path if all_episodes[0].cam0_temp_path.exists() 
-                                 else output_dir / DEFAULT_VIDEO_PATH.format(
-                                     video_key='cam_0', chunk_index=0, file_index=0))
+    first_video_path = output_dir / DEFAULT_VIDEO_PATH.format(
+        video_key='observation.images.cam_0', chunk_index=0, file_index=0)
+    video_info = get_video_info(first_video_path)
     
     # Write info.json
     total_frames = sum(ep.num_frames for ep in all_episodes)
@@ -695,25 +710,18 @@ def convert_abb_to_lerobot_v30(
         'features': {
             'observation.state': {
                 'dtype': 'float32',
-                'shape': [6],
-                'names': [f'joint_{i+1}' for i in range(6)],
-                'fps': int(video_info['fps'])
+                'shape': [7],
+                'names': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'gripper'],
             },
             'action': {
                 'dtype': 'float32',
-                # 'shape': [8],
-                # 'names': ['ee_pos_x', 'ee_pos_y', 'ee_pos_z', 
-                #          'ee_quat_x', 'ee_quat_y', 'ee_quat_z', 'ee_quat_w',
-                #          'gripper'],
-                'shape': [6],
-                'names': [f'joint_{i+1}' for i in range(6)],
-                'fps': int(video_info['fps'])
+                'shape': [7],
+                'names': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'gripper'],
             },
-            'cam_0': {
+            'observation.images.cam_0': {
                 'dtype': 'video',
                 'shape': [video_info['height'], video_info['width'], 3],
                 'names': ['height', 'width', 'channels'],
-                'fps': int(video_info['fps']),
                 'info': {
                     'video.fps': int(video_info['fps']),
                     'video.height': video_info['height'],
@@ -725,11 +733,10 @@ def convert_abb_to_lerobot_v30(
                     'has_audio': False
                 }
             },
-            'cam_1': {
+            'observation.images.cam_1': {
                 'dtype': 'video',
                 'shape': [video_info['height'], video_info['width'], 3],
                 'names': ['height', 'width', 'channels'],
-                'fps': int(video_info['fps']),
                 'info': {
                     'video.fps': int(video_info['fps']),
                     'video.height': video_info['height'],
@@ -745,31 +752,26 @@ def convert_abb_to_lerobot_v30(
                 'dtype': 'float32',
                 'shape': [1],
                 'names': None,
-                'fps': int(video_info['fps'])
             },
             'frame_index': {
                 'dtype': 'int64',
                 'shape': [1],
                 'names': None,
-                'fps': int(video_info['fps'])
             },
             'episode_index': {
                 'dtype': 'int64',
                 'shape': [1],
                 'names': None,
-                'fps': int(video_info['fps'])
             },
             'index': {
                 'dtype': 'int64',
                 'shape': [1],
                 'names': None,
-                'fps': int(video_info['fps'])
             },
             'task_index': {
                 'dtype': 'int64',
                 'shape': [1],
                 'names': None,
-                'fps': int(video_info['fps'])
             }
         }
     }
@@ -785,10 +787,12 @@ def convert_abb_to_lerobot_v30(
     logging.info(f"✓ CONVERSION COMPLETED SUCCESSFULLY")
     logging.info(f"{'='*60}")
     logging.info(f"  Dataset version: {CODEBASE_VERSION}")
-    logging.info(f"  Episodes: {len(all_episodes)}")
+    logging.info(f"  Episodes: {len(all_episodes)} (indices 0-{len(all_episodes)-1})")
     logging.info(f"  Total frames: {total_frames}")
     logging.info(f"  FPS: {int(video_info['fps'])}")
     logging.info(f"  Resolution: {video_info['width']}x{video_info['height']}")
+    logging.info(f"  State dim: 7 (joint + gripper)")
+    logging.info(f"  Action dim: 7 (joint + gripper)")
     logging.info(f"  Output directory: {output_dir}")
     logging.info(f"{'='*60}")
 
@@ -831,7 +835,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--task',
         type=str,
-        default=r"Pick up the box on the conveyor belt and place it into the blue plastic bin."
+        default=r"Pick up blocks from conveyor belt and place them in boxes"
     )
 
     args = parser.parse_args()
