@@ -17,51 +17,51 @@ from pathlib import Path
 
 from ..configs import CameraConfig, ColorMode, Cv2Rotation
 
+__all__ = ["GoProCameraConfig", "ColorMode", "Cv2Rotation"]
 
-@CameraConfig.register_subclass("kinectdk")
+
+@CameraConfig.register_subclass("gopro")
 @dataclass
-class KinectDKCameraConfig(CameraConfig):
-    """Configuration class for Intel RealSense cameras.
+class GoProCameraConfig(CameraConfig):
+    """Configuration class for GoPro-based camera devices or video files.
 
-    This class provides specialized configuration options for Intel RealSense cameras,
-    including support for depth sensing and device identification via serial number or name.
+    This class provides configuration options for cameras accessed through GoPro,
+    supporting both physical camera devices and video files. It includes settings
+    for resolution, frame rate, color mode, and image rotation.
 
-    Example configurations for Intel RealSense D405:
+    Example configurations:
     ```python
     # Basic configurations
-    RealSenseCameraConfig("0123456789", 30, 1280, 720)  # 1280x720 @ 30FPS
-    RealSenseCameraConfig("0123456789", 60, 640, 480)  # 640x480 @ 60FPS
+    GoProCameraConfig(0, 30, 1280, 720)   # 1280x720 @ 30FPS
+    GoProCameraConfig(/dev/video4, 60, 640, 480)   # 640x480 @ 60FPS
 
-    # Advanced configurations
-    RealSenseCameraConfig("0123456789", 30, 640, 480, use_depth=True)  # With depth sensing
-    RealSenseCameraConfig("0123456789", 30, 640, 480, rotation=Cv2Rotation.ROTATE_90)  # With 90° rotation
+    # Advanced configurations with FOURCC format
+    GoProCameraConfig(128422271347, 30, 640, 480, rotation=Cv2Rotation.ROTATE_90, fourcc="MJPG")     # With 90° rotation and MJPG format
+    GoProCameraConfig(0, 30, 1280, 720, fourcc="YUYV")     # With YUYV format
     ```
 
     Attributes:
+        index_or_path: Either an integer representing the camera device index,
+                      or a Path object pointing to a video file.
         fps: Requested frames per second for the color stream.
         width: Requested frame width in pixels for the color stream.
         height: Requested frame height in pixels for the color stream.
-        serial_number_or_name: Unique serial number or human-readable name to identify the camera.
         color_mode: Color mode for image output (RGB or BGR). Defaults to RGB.
-        use_depth: Whether to enable depth stream. Defaults to False.
         rotation: Image rotation setting (0°, 90°, 180°, or 270°). Defaults to no rotation.
         warmup_s: Time reading frames before returning from connect (in seconds)
+        fourcc: FOURCC code for video format (e.g., "MJPG", "YUYV", "I420"). Defaults to None (auto-detect).
 
     Note:
-        - Either name or serial_number must be specified.
-        - Depth stream configuration (if enabled) will use the same FPS as the color stream.
-        - The actual resolution and FPS may be adjusted by the camera to the nearest supported mode.
-        - For `fps`, `width` and `height`, either all of them need to be set, or none of them.
+        - Only 3-channel color output (RGB/BGR) is currently supported.
+        - FOURCC codes must be 4-character strings (e.g., "MJPG", "YUYV"). Some common FOUCC codes: https://learn.microsoft.com/en-us/windows/win32/medfound/video-fourccs#fourcc-constants
+        - Setting FOURCC can help achieve higher frame rates on some cameras.
     """
 
-    width: int
-    height: int
-    # serial_number_or_name: str
-    index_or_path: int = 0
+    index_or_path: int | Path
     color_mode: ColorMode = ColorMode.RGB
-    use_depth: bool = False
     rotation: Cv2Rotation = Cv2Rotation.NO_ROTATION
     warmup_s: int = 1
+    fourcc: str | None = None
 
     def __post_init__(self) -> None:
         if self.color_mode not in (ColorMode.RGB, ColorMode.BGR):
@@ -79,8 +79,7 @@ class KinectDKCameraConfig(CameraConfig):
                 f"`rotation` is expected to be in {(Cv2Rotation.NO_ROTATION, Cv2Rotation.ROTATE_90, Cv2Rotation.ROTATE_180, Cv2Rotation.ROTATE_270)}, but {self.rotation} is provided."
             )
 
-        values = (self.fps, self.width, self.height)
-        if any(v is not None for v in values) and any(v is None for v in values):
+        if self.fourcc is not None and (not isinstance(self.fourcc, str) or len(self.fourcc) != 4):
             raise ValueError(
-                "For `fps`, `width` and `height`, either all of them need to be set, or none of them."
+                f"`fourcc` must be a 4-character string (e.g., 'MJPG', 'YUYV'), but '{self.fourcc}' is provided."
             )

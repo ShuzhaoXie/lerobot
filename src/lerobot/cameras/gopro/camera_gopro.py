@@ -36,7 +36,7 @@ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnected
 
 from ..camera import Camera
 from ..utils import get_cv2_backend, get_cv2_rotation
-from .configuration_opencv import ColorMode, OpenCVCameraConfig
+from .configuration_gopro import ColorMode, GoProCameraConfig
 
 # NOTE(Steven): The maximum opencv device index depends on your operating system. For instance,
 # if you have 3 cameras, they should be associated to index 0, 1, and 2. This is the case
@@ -48,7 +48,7 @@ MAX_OPENCV_INDEX = 60
 logger = logging.getLogger(__name__)
 
 
-class OpenCVCamera(Camera):
+class GoProCamera(Camera):
     """
     Manages camera interactions using OpenCV for efficient frame recording.
 
@@ -101,9 +101,9 @@ class OpenCVCamera(Camera):
         ```
     """
 
-    def __init__(self, config: OpenCVCameraConfig):
+    def __init__(self, config: GoProCameraConfig):
         """
-        Initializes the OpenCVCamera instance.
+        Initializes the GoProCamera instance.
 
         Args:
             config: The configuration settings for the camera.
@@ -143,9 +143,9 @@ class OpenCVCamera(Camera):
 
     def connect(self, warmup: bool = True) -> None:
         """
-        Connects to the OpenCV camera specified in the configuration.
+        Connects to the GoPro camera specified in the configuration.
 
-        Initializes the OpenCV VideoCapture object, sets desired camera properties
+        Initializes the GoPro VideoCapture object, sets desired camera properties
         (FPS, width, height), and performs initial checks.
 
         Raises:
@@ -156,29 +156,34 @@ class OpenCVCamera(Camera):
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} is already connected.")
 
-        # Use 1 thread for OpenCV operations to avoid potential conflicts or
+        # Use 1 thread for GoPro operations to avoid potential conflicts or
         # blocking in multi-threaded applications, especially during data collection.
-        cv2.setNumThreads(1)
-        logger.info(f"self.index_or_path {str(self.index_or_path)}")
+        # cv2.setNumThreads(1)
+        # logger.info(f"self.index_or_path {str(self.index_or_path)}")
         if "gopro" in str(self.index_or_path):
             self.videocapture = cv2.VideoCapture("udp://10.5.5.100:8554?buffer_size=1000000&fifo_size=1000000&overrun_nonfatal=1", self.backend)
         else:
             self.videocapture = cv2.VideoCapture(self.index_or_path, self.backend)
 
-        if not self.videocapture.isOpened():
-            self.videocapture.release()
-            self.videocapture = None
-            raise ConnectionError(
-                f"Failed to open {self}.Run `lerobot-find-cameras opencv` to find available cameras."
-            )
+        try:
+            self.videocapture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass 
+        
+        # if not self.videocapture.isOpened():
+        #     self.videocapture.release()
+        #     self.videocapture = None
+        #     raise ConnectionError(
+        #         f"Failed to open {self}.Run `lerobot-find-cameras GoPro` to find available cameras."
+        #     )
 
-        self._configure_capture_settings()
+        # self._configure_capture_settings()
 
-        if warmup:
-            start_time = time.time()
-            while time.time() - start_time < self.warmup_s:
-                self.read()
-                time.sleep(0.1)
+        # if warmup:
+        #     start_time = time.time()
+        #     while time.time() - start_time < self.warmup_s:
+        #         self.read()
+        #         time.sleep(0.1)
 
         logger.info(f"{self} connected.")
 
@@ -186,7 +191,7 @@ class OpenCVCamera(Camera):
         """
         Applies the specified FOURCC, FPS, width, and height settings to the connected camera.
 
-        This method attempts to set the camera properties via OpenCV. It checks if
+        This method attempts to set the camera properties via GoPro. It checks if
         the camera successfully applied the settings and raises an error if not.
         FOURCC is set first (if specified) as it can affect the available FPS and resolution options.
 
@@ -223,10 +228,10 @@ class OpenCVCamera(Camera):
         else:
             self._validate_width_and_height()
 
-        if self.fps is None:
-            self.fps = self.videocapture.get(cv2.CAP_PROP_FPS)
-        else:
-            self._validate_fps()
+        # if self.fps is None:
+        #     self.fps = self.videocapture.get(cv2.CAP_PROP_FPS)
+        # else:
+        #     self._validate_fps()
 
     def _validate_fps(self) -> None:
         """Validates and sets the camera's frames per second (FPS)."""
@@ -291,56 +296,17 @@ class OpenCVCamera(Camera):
     @staticmethod
     def find_cameras() -> list[dict[str, Any]]:
         """
-        Detects available OpenCV cameras connected to the system.
+        Detects available GoPro cameras connected to the system.
 
         On Linux, it scans '/dev/video*' paths. On other systems (like macOS, Windows),
-        it checks indices from 0 up to `MAX_OPENCV_INDEX`.
+        it checks indices from 0 up to `MAX_GoPro_INDEX`.
 
         Returns:
             List[Dict[str, Any]]: A list of dictionaries,
             where each dictionary contains 'type', 'id' (port index or path),
             and the default profile properties (width, height, fps, format).
         """
-        found_cameras_info = []
-
-        targets_to_scan: list[str | int]
-        if platform.system() == "Linux":
-            possible_paths = sorted(Path("/dev").glob("video*"), key=lambda p: p.name)
-            targets_to_scan = [str(p) for p in possible_paths]
-        else:
-            targets_to_scan = [int(i) for i in range(MAX_OPENCV_INDEX)]
-
-        for target in targets_to_scan:
-            camera = cv2.VideoCapture(target)
-            if camera.isOpened():
-                default_width = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
-                default_height = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                default_fps = camera.get(cv2.CAP_PROP_FPS)
-                default_format = camera.get(cv2.CAP_PROP_FORMAT)
-
-                # Get FOURCC code and convert to string
-                default_fourcc_code = camera.get(cv2.CAP_PROP_FOURCC)
-                default_fourcc_code_int = int(default_fourcc_code)
-                default_fourcc = "".join([chr((default_fourcc_code_int >> 8 * i) & 0xFF) for i in range(4)])
-
-                camera_info = {
-                    "name": f"OpenCV Camera @ {target}",
-                    "type": "OpenCV",
-                    "id": target,
-                    "backend_api": camera.getBackendName(),
-                    "default_stream_profile": {
-                        "format": default_format,
-                        "fourcc": default_fourcc,
-                        "width": default_width,
-                        "height": default_height,
-                        "fps": default_fps,
-                    },
-                }
-
-                found_cameras_info.append(camera_info)
-                camera.release()
-
-        return found_cameras_info
+        pass
 
     def read(self, color_mode: ColorMode | None = None) -> NDArray[Any]:
         """
@@ -412,9 +378,10 @@ class OpenCVCamera(Camera):
         h, w, c = image.shape
 
         if h != self.capture_height or w != self.capture_width:
-            raise RuntimeError(
-                f"{self} frame width={w} or height={h} do not match configured width={self.capture_width} or height={self.capture_height}."
-            )
+            # raise RuntimeError(
+            #     f"{self} frame width={w} or height={h} do not match configured width={self.capture_width} or height={self.capture_height}."
+            # )
+            image = cv2.resize(image, (self.capture_width, self.capture_height))
 
         if c != 3:
             raise RuntimeError(f"{self} frame channels={c} do not match expected 3 channels (RGB/BGR).")

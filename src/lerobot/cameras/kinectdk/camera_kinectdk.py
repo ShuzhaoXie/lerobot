@@ -125,7 +125,8 @@ class KinectDKCamera(Camera):
         self.color_mode = config.color_mode
         self.use_depth = config.use_depth
         self.warmup_s = config.warmup_s
-
+        self.index_or_path = config.index_or_path
+        self.serial_number = "your_fucking_kinect_dk"
         # self.rs_pipeline: rs.pipeline | None = None
         # self.rs_profile: rs.pipeline_profile | None = None
 
@@ -148,7 +149,7 @@ class KinectDKCamera(Camera):
     @property
     def is_connected(self) -> bool:
         """Checks if the camera pipeline is started and streams are active."""
-        return self.rs_pipeline is not None and self.rs_profile is not None
+        return self.device is not None
 
     def connect(self, warmup: bool = True) -> None:
         """
@@ -173,8 +174,7 @@ class KinectDKCamera(Camera):
         pykinect.initialize_libraries()
         device_config = pykinect.default_configuration
         device_config.color_resolution = pykinect.K4A_COLOR_RESOLUTION_1080P
-        device = pykinect.start_device(device_index=0, config=device_config)
-        self.device = device
+        self.device = pykinect.start_device(device_index=int(self.index_or_path), config=device_config)
 
         if warmup:
             time.sleep(
@@ -220,7 +220,7 @@ class KinectDKCamera(Camera):
             raise RuntimeError(f"{self} read failed (status={ret}).")
 
         if shape[0]!=self.width and shape[1]!=self.height:
-            print("resize the image")
+            # print("resize the image")
             try:
                 resized_frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
                 frame = resized_frame
@@ -373,6 +373,10 @@ class KinectDKCamera(Camera):
 
         return frame
 
+    @staticmethod
+    def find_cameras() -> list[dict[str, Any]]:
+        pass 
+    
     def disconnect(self) -> None:
         """
         Disconnects from the camera, stops the pipeline, and cleans up resources.

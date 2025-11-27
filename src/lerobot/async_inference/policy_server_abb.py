@@ -229,11 +229,11 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
             with self._predicted_timesteps_lock:
                 self._predicted_timesteps.add(obs.get_timestep())
-
+            # self.logger.info(f"SHUZHAO: here come a error?")
             start_time = time.perf_counter()
             action_chunk = self._predict_action_chunk(obs)
             inference_time = time.perf_counter() - start_time
-
+            # self.logger.info(f"SHUZHAO: here come a error? {type(action_chunk)}")
             start_time = time.perf_counter()
             actions_bytes = pickle.dumps(action_chunk)  # nosec
             serialize_time = time.perf_counter() - start_time
@@ -341,6 +341,8 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """
         """1. Prepare observation"""
         start_prepare = time.perf_counter()
+        # self.logger.info("1. Prepare observation")
+        self.logger.info(f"lerobot features, {self.lerobot_features}")
         observation: Observation = raw_observation_to_observation(
             observation_t.get_observation(),
             self.lerobot_features,
@@ -349,12 +351,15 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         prepare_time = time.perf_counter() - start_prepare
 
         """2. Apply preprocessor"""
+        # tmp_obs_stat = observation["observation.state"]
+        # self.logger.info(f"2. Apply preprocessor {tmp_obs_stat}")
         start_preprocess = time.perf_counter()
         observation = self.preprocessor(observation)
         self.last_processed_obs: TimedObservation = observation_t
         preprocessing_time = time.perf_counter() - start_preprocess
 
         """3. Get action chunk"""
+        # self.logger.info("3. Get action chunk")
         start_inference = time.perf_counter()
         action_tensor = self._get_action_chunk(observation)
         inference_time = time.perf_counter() - start_inference
@@ -366,6 +371,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         # Apply postprocessor (handles unnormalization and device movement)
         # Postprocessor expects (B, action_dim) per action, but we have (B, chunk_size, action_dim)
         # So we process each action in the chunk individually
+        # self.logger.info("4. Apply postprocessor")
         start_postprocess = time.perf_counter()
         _, chunk_size, _ = action_tensor.shape
 
@@ -382,6 +388,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.logger.debug(f"Postprocessed action shape: {action_tensor.shape}")
 
         """5. Convert to TimedAction list"""
+        # self.logger.info("5. Convert to TimedAction list")
         action_chunk = self._time_action_chunk(
             observation_t.get_timestamp(), list(action_tensor), observation_t.get_timestep()
         )

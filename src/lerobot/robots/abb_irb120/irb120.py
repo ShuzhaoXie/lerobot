@@ -23,11 +23,6 @@ from collections import deque
 import inspect
 
 from lerobot.cameras.utils import make_cameras_from_configs
-from lerobot.motors import Motor, MotorCalibration, MotorNormMode
-from lerobot.motors.feetech import (
-    FeetechMotorsBus,
-    OperatingMode,
-)
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from ..robot import Robot
@@ -61,7 +56,8 @@ class IRB120(Robot):
         self.config = config
         self.delay = .08
         self.cameras = make_cameras_from_configs(config.cameras)
-    
+        self.fucking_connected = False 
+        
     def set_units(self, linear, angular):
         units_l = {'millimeters': 1.0,
                    'meters': 1000.0,
@@ -71,28 +67,46 @@ class IRB120(Robot):
         self.scale_linear = units_l[linear]
         self.scale_angle = units_a[angular]
 
-    # @property
-    # def _motors_ft(self) -> dict[str, type]:
-    #     return {f"{motor}.pos": float for motor in self.bus.motors}
-
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
         return {
             cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
         }
 
-    # @cached_property
-    # def observation_features(self) -> dict[str, type | tuple]:
-    #     return {**self._motors_ft, **self._cameras_ft}
+    @cached_property
+    def observation_features(self) -> dict[str, type | tuple]:
+        return {
+            **{f"joint_{i}": float for i in range(1, 7)},
+            "gripper": float,
+            **self._cameras_ft,
+        }
+    
+    @cached_property
+    def action_features(self) -> dict[str, type]:
+        return {
+            **{f"joint_{i}": float for i in range(1, 7)},
+            "gripper": float,
+        }
 
-    # @cached_property
-    # def action_features(self) -> dict[str, type]:
-    #     return self._motors_ft
+    @property
+    def is_connected(self) -> bool:
+        return self.fucking_connected and all(cam.is_connected for cam in self.cameras.values())
 
-    # @property
-    # def is_connected(self) -> bool:
-    #     return self.bus.is_connected and all(cam.is_connected for cam in self.cameras.values())
-
+    @property
+    def is_calibrated(self) -> bool:
+        # TODO: check abb is calibrated or not.
+        return True
+    
+    def calibrate(self) -> None:
+        # TODO: add calibration?
+        if self.is_calibrated:
+            pass 
+        else:
+            pass
+    
+    def configure(self) -> None:
+        # TODO: it seems like a required abs method, please add it if you have leisure.
+        pass
     def connect_motion(self, remote):
         print('Attempting to connect to robot motion server at %s', str(remote))
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -129,6 +143,7 @@ class IRB120(Robot):
 
         self.connect_motion((self.config.ip, self.config.port))
 
+        self.fucking_connected = True
         # self.bus.connect()
         # if not self.is_calibrated and calibrate:
         #     logger.info(
@@ -139,12 +154,11 @@ class IRB120(Robot):
         for cam in self.cameras.values():
             cam.connect()
         
-        self.set_units()
+        self.set_units('millimeters', 'degrees')
         self.set_tool()
         self.set_workobject()
         self.set_speed()
         self.set_zone()
-        self.is_connected = True
         # self.configure()
         logger.info(f"{self} connected.")
 
@@ -158,8 +172,8 @@ class IRB120(Robot):
         obs_list, gripper = self.get_joints()
         # obs_dict = self.bus.sync_read("Present_Position")
         # obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
-        obs_dict = {f"joint_{i}": val for i, val in enumerate(obs_list)}
-        obs_dict["gripper"] = int(gripper)
+        obs_dict = {f"joint_{i+1}": val for i, val in enumerate(obs_list)}
+        obs_dict["gripper"] = float(gripper)
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
@@ -169,7 +183,7 @@ class IRB120(Robot):
             obs_dict[cam_key] = cam.async_read()
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
-
+        # self.obs = obs_dict
         return obs_dict
 
     def get_ee_pose_and_joints(self):
@@ -208,12 +222,13 @@ class IRB120(Robot):
         """
         msg = "04 #"
         data = self.send(msg).split()
-        print('abb_new.py line 101: get_joints recived', data, ', scale_angle, ', self.scale_angle, ', data[1]', data[1])
+        # print('abb_new.py line 101: get_joints recived', data, ', scale_angle, ', self.scale_angle, ', data[1]', data[1])
         # print('print(data)' + '-'*10)
         # print(data)
         # import pdb; pdb.set_trace()
         # check data[2] is 0 or 1;
-        return [float(s) / self.scale_angle for s in data[2:8]], abs(1-int(data[1]))
+        gripper = 0 if int(data[1]) == 1 else 1
+        return [float(s) / self.scale_angle for s in data[2:8]], gripper
     
     def set_joints(self, joints):
         """
@@ -314,7 +329,7 @@ class IRB120(Robot):
             return
         data = self.sock.recv(4096).decode()  # Python 3: 接收字节需解码为字符串
         print('%-14s received: %s', caller, data)  # Python 3: 修复拼写错误recieved→received
-        print('%-14s received2: %s', caller, data)
+        # print('%-14s received2: %s', caller, data)
         return data
 
 
@@ -333,15 +348,17 @@ class IRB120(Robot):
         """
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
+        logger.debug(f"---------received action: {action}")
         joints = []
         for i in range(1, 7):
-            joints.append(float(action[f'joint{i}']))
+            joints.append(float(action[f'joint_{i}']))
+        # print('here?')
         self.set_joints(joints)
         if action['gripper'] > 0.5:
-            self.set_dio(1, 1)
+            self.set_dio(1, 0)
             gripper_state = 1
         else:
-            self.set_dio(2, 1)
+            self.set_dio(2, 0)
             gripper_state = 0
 
         return action # just return the fucking action
