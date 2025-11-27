@@ -15,7 +15,8 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-
+from typing import Optional
+import numpy as np
 from lerobot.cameras import CameraConfig
 
 from ..config import RobotConfig
@@ -26,7 +27,6 @@ from ..config import RobotConfig
 class IRB120Config(RobotConfig):
     # Port to connect to the arm
     port: str
-    
     ip: str
  
     # disable_torque_on_disconnect: bool = True
@@ -39,5 +39,10 @@ class IRB120Config(RobotConfig):
     # # cameras
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
+    action_dt = 0.05
+    max_steps = 300
+    action_limits: Optional[np.array] = None
+    seed = 42
+    
     # # Set to `True` for backward compatibility with previous policies/dataset
     # use_degrees: bool = False
