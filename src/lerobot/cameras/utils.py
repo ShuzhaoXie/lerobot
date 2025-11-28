@@ -42,7 +42,10 @@ def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> dict[s
             from .reachy2_camera.reachy2_camera import Reachy2Camera
 
             cameras[key] = Reachy2Camera(cfg)
-
+        elif cfg.type == "azurekinectdk":
+            from .kinectdk.camera_kinectdk import KinectDKCamera
+            
+            cameras[key] = KinectDKCamera(cfg)
         else:
             try:
                 cameras[key] = cast(Camera, make_device_from_device_class(cfg))

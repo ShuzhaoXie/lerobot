@@ -15,7 +15,7 @@
 """
 Example command:
 ```shell
-python src/lerobot/async_inference/robot_client.py \
+python src/lerobot/async_inference/robot_client_abb.py \
     --robot.type=so100_follower \
     --robot.port=/dev/tty.usbmodem58760431541 \
     --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 1920, height: 1080, fps: 30}}" \
@@ -48,6 +48,8 @@ import torch
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from lerobot.cameras.kinectdk.configuration_kinectdk import KinectDKCameraConfig # noqa: F401????
+from lerobot.cameras.gopro.configuration_gopro import GoProCameraConfig
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
@@ -56,7 +58,7 @@ from lerobot.robots import (  # noqa: F401
     make_robot_from_config,
     so100_follower,
     so101_follower,
-    abb_irb120
+    abb_irb120, # fuck, you must import abb_irb120, fuck, By Shuzhao
 )
 from lerobot.transport import (
     services_pb2,  # type: ignore
@@ -397,7 +399,7 @@ class RobotClient:
 
             raw_observation: RawObservation = self.robot.get_observation()
             raw_observation["task"] = task
-
+            self.logger.debug(f"raw_observation: {raw_observation.keys()}")
             with self.latest_action_lock:
                 latest_action = self.latest_action
 

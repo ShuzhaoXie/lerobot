@@ -63,6 +63,7 @@ def visualize_action_queue_size(action_queue_size: list[int]) -> None:
 
 
 def map_robot_keys_to_lerobot_features(robot: Robot) -> dict[str, dict]:
+    # print('robot.observation_features', robot.observation_features.keys())
     return hw_to_dataset_features(robot.observation_features, OBS_STR, use_video=False)
 
 
@@ -90,8 +91,9 @@ def raw_observation_to_observation(
     policy_image_features: dict[str, PolicyFeature],
 ) -> Observation:
     observation = {}
-
+    # print('raw_obs', raw_observation.keys())
     observation = prepare_raw_observation(raw_observation, lerobot_features, policy_image_features)
+    # print('obs', observation.keys())
     for k, v in observation.items():
         if isinstance(v, torch.Tensor):  # VLAs present natural-language instructions in observations
             if "image" in k:
@@ -149,9 +151,10 @@ def prepare_raw_observation(
     # 1. {motor.pos1:value1, motor.pos2:value2, ..., laptop:np.ndarray} ->
     # -> {observation.state:[value1,value2,...], observation.images.laptop:np.ndarray}
     lerobot_obs = make_lerobot_observation(robot_obs, lerobot_features)
-
+    print('prepare_raw_observation', lerobot_obs.keys())
     # 2. Greps all observation.images.<> keys
     image_keys = list(filter(is_image_key, lerobot_obs))
+    print('image_keys', image_keys)
     # state's shape is expected as (B, state_dim)
     state_dict = {OBS_STATE: extract_state_from_raw_observation(lerobot_obs)}
     image_dict = {
@@ -269,6 +272,8 @@ class RemotePolicyConfig:
     actions_per_chunk: int
     device: str = "cpu"
     rename_map: dict[str, str] = field(default_factory=dict)
+    use_lora: int = 0
+    lora_ckpt_path: str = ""
 
 
 def _compare_observation_states(obs1_state: torch.Tensor, obs2_state: torch.Tensor, atol: float) -> bool:

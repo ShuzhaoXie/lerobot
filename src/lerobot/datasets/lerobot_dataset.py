@@ -841,7 +841,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         """Check if the cached dataset contains all requested episodes and their video files."""
         if self.hf_dataset is None or len(self.hf_dataset) == 0:
             return False
-
+        
         # Get available episode indices from cached dataset
         available_episodes = {
             ep_idx.item() if isinstance(ep_idx, torch.Tensor) else ep_idx
@@ -859,7 +859,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Check if all requested episodes are available in cached data
         if not requested_episodes.issubset(available_episodes):
             return False
-
+        
         # Check if all required video files exist
         if len(self.meta.video_keys) > 0:
             for ep_idx in requested_episodes:
