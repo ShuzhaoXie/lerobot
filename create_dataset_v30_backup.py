@@ -17,6 +17,7 @@ import argparse
 import logging
 from pathlib import Path
 from typing import Dict, List, Any, Tuple
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -37,7 +38,7 @@ DEFAULT_VIDEO_PATH = "videos/{video_key}/chunk-{chunk_index:03d}/file_{file_inde
 OBS_NAMES=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'gripper']
 ACTION_NAMES=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'gripper']
 # dataset_type: full14
-OBS_NAMES=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6',  'gripper']
+# OBS_NAMES=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6',  'gripper']
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -162,20 +163,31 @@ def parse_action_states(action_json_path: Path) -> List[Dict]:
     with open(action_json_path, 'r') as f:
         data = json.load(f)
     states = data.get('states', [])
+    tt = data.get('time', [])
+    # logging.info(f'times {len(tt)} {len(states)}')
     result: List[Dict] = []
     
-    for st in states:
+    for i, st in enumerate(states):
         if not isinstance(st, dict):
+            result.append({
+                'joint': None,
+                'gripper': None,
+                'time': tt[i]
+            })
             continue
         joint = st.get('joint')
         gripper = st.get('gripper')
         
-        if joint is None:
-            continue
-        if not isinstance(joint, list) or len(joint) != 6:
+        if joint is None or (not isinstance(joint, list)) or len(joint) != 6:
+            result.append({
+                'joint': None,
+                'gripper': None,
+                'time': tt[i]
+            })
             continue
         
         # Parse gripper: "on" -> 1.0, "off" -> 0.0
+        # TODO, maybe the "None" dose not mean the ``off gripper``
         if gripper is None:
             g = 0.0
         elif isinstance(gripper, str):
@@ -189,9 +201,76 @@ def parse_action_states(action_json_path: Path) -> List[Dict]:
         result.append({
             'joint': np.array(list(map(float, joint)), dtype=np.float32),
             'gripper': g,
+            'time': tt[i]
         })
     return result
 
+# GPT 说有更快方法
+# ffmpeg -i cam_0.mp4 \
+#     -vf "select='not(in(n\,3\,4\,8\,13))',scale=448:448" \
+#     -c:v libx264 -preset fast -pix_fmt yuv420p -y cam0_temp.mp4
+
+def count_frames(path):
+    cmd = [
+        'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-count_frames', '-show_entries', 'stream=nb_read_frames',
+        '-of', 'json', str(path)
+    ]
+    output = subprocess.check_output(cmd).decode('utf-8')
+    data = json.loads(output)
+    return int(data['streams'][0]['nb_read_frames'])
+
+def filter_and_save_video(src_path, dst_path, delete_ids, fps):
+    # 自动创建临时目录，任务完成后自动删除
+    frame_duration = 1.0 / float(fps)
+    with tempfile.TemporaryDirectory(prefix="frames_") as frame_dir:
+        print(f"创建临时目录: {frame_dir}")
+
+        # 1) 强制导出帧（已包含缩放）
+        subprocess.run([
+            "ffmpeg", "-i", src_path, 
+            "-vf", "scale=448:448",  # 在导出时缩放
+            "-vsync", "cfr", 
+            "-qscale:v", "1", 
+            f"{frame_dir}/%06d.png", 
+            "-y"
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+        # 2) 检查帧是否导出
+        files = sorted(f for f in os.listdir(frame_dir) if f.endswith(".png"))
+        print(f"导出的帧数量: {len(files)} {files[0]}")
+
+        if len(files) == 0:
+            print("❗严重错误：没有帧被导出。视频本身可能有问题。")
+            return
+        
+        total_frames = len(files)
+
+        # 3) 写 concat list（过滤要删除的帧）
+        list_file = os.path.join(frame_dir, "file_list.txt")
+        with open(list_file, "w") as f:
+            for i in range(total_frames):
+                if i not in delete_ids:  # 注意：帧编号从1开始
+                    f.write(f"file '{frame_dir}/{(i+1):06d}.png'\n")
+                    f.write(f"duration {frame_duration:.8f}\n")
+
+#             "-vf", f"fps={fps}",  # 确保帧率一致
+        # 4) 使用文件列表重新生成视频
+        subprocess.run([
+            "ffmpeg",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", list_file,
+            "-pix_fmt", "yuv420p",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-y",
+            dst_path
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        
+        print(f"✅ 视频处理完成：{dst_path}")
+
+     
 
 class EpisodeData:
     """Container for episode data."""
@@ -248,34 +327,75 @@ def process_raw_episode(episode_dir: Path, episode_index: int, temp_dir: Path, f
     
     # Parse action states
     try:
-        states_data = parse_action_states(action_json)
+        raw_states_data = parse_action_states(action_json)
     except Exception as e:
         logging.warning(f"Skipped {episode_dir.name}: failed to parse action.json - {e}")
         return None
         
-    if len(states_data) == 0:
+    if len(raw_states_data) == 0:
         logging.warning(f"Skipped {episode_dir.name}: no valid states in action.json")
         return None
     
+    c0_count = count_frames(cam0_in)
+    c1_count = count_frames(cam1_in)
+    logging.info(f"c0count {c0_count}, c1count {c1_count}, lenraw {len(raw_states_data)}")
+    try:
+        assert c0_count == len(raw_states_data) and c1_count == c0_count
+    except:
+        logging.debug(f"name: {episode_dir.name}, count: {c0_count}, lenraw: {len(raw_states_data)}")
+    # logging.info(f'len raw_states_data {len(raw_states_data)}')
+    
+    states_data = []
+    delete_ids = []
+    
+    if c0_count != len(raw_states_data):
+        for i in range(len(raw_states_data), c0_count):
+            delete_ids.append(i)
+    
+    last_i = -1
+    for i, st in enumerate(raw_states_data):
+        if st["joint"] is None:
+            delete_ids.append(i)
+            continue
+        else:
+            states_data.append(st)
+            last_i = i
+    # Drop the last frame, as we only use the action of the last frame.
+    assert last_i != -1
+    delete_ids.append(last_i)
+    delete_ids = list(set(sorted(delete_ids)))
+    
+    
+    
+    logging.info(f"delete_ids, {delete_ids}")
     # Extract joints and grippers
+    logging.info(f'len(states_data) {len(states_data)}')
     joints = [state['joint'] for state in states_data]
+    logging.info(f'len(joints) {len(joints)}')
     grippers = [state['gripper'] for state in states_data]
     
     # Log gripper distribution for debugging
-    on_count = sum(1 for g in grippers if g == 1.0)
-    off_count = sum(1 for g in grippers if g == 0.0)
-    logging.debug(f"{episode_dir.name}: gripper on={on_count}, off={off_count}")
+    
+    
+    # on_count = sum(1 for g in grippers if g == 1.0)
+    # off_count = sum(1 for g in grippers if g == 0.0)
+    # logging.debug(f"{episode_dir.name}: gripper on={on_count}, off={off_count}")
     
     # Re-encode videos to temp directory
     ep_data.cam0_temp_path = temp_dir / f'cam0_ep{episode_index:06d}.mp4'
     ep_data.cam1_temp_path = temp_dir / f'cam1_ep{episode_index:06d}.mp4'
     
-    if not run_ffmpeg_reencode(cam0_in, ep_data.cam0_temp_path, fps_rational):
-        logging.warning(f"Skipped {episode_dir.name}: failed to re-encode cam0 video")
-        return None
-    if not run_ffmpeg_reencode(cam1_in, ep_data.cam1_temp_path, fps_rational):
-        logging.warning(f"Skipped {episode_dir.name}: failed to re-encode cam1 video")
-        return None
+    #  把cam_0和cam_1里帧序号（从0开始）在delete_ids（也是从0开始）里的帧删除，并且rescale视频到448x448，'-c:v', 'libx264',
+    filter_and_save_video(cam0_in, ep_data.cam0_temp_path, delete_ids, fps_rational)
+    filter_and_save_video(cam1_in, ep_data.cam1_temp_path, delete_ids, fps_rational)
+    
+    # logging.info(f"c0_count: {c0_count}, c1_count: {c1_count}")
+    # if not run_ffmpeg_reencode(cam0_in, ep_data.cam0_temp_path, fps_rational):
+    #     logging.warning(f"Skipped {episode_dir.name}: failed to re-encode cam0 video")
+    #     return None
+    # if not run_ffmpeg_reencode(cam1_in, ep_data.cam1_temp_path, fps_rational):
+    #     logging.warning(f"Skipped {episode_dir.name}: failed to re-encode cam1 video")
+    #     return None
     
     # Get video info
     try:
@@ -285,32 +405,49 @@ def process_raw_episode(episode_dir: Path, episode_index: int, temp_dir: Path, f
         logging.warning(f"Skipped {episode_dir.name}: failed to get video info - {e}")
         return None
     
+    logging.info(f'joints: {len(joints)}')
     # Align frames (skip first frame as in original script)
-    available_frames = min(info0.get('nb_frames', 0), info1.get('nb_frames', 0))
-    max_aligned = min(len(joints), available_frames)
-    if max_aligned <= 1:
-        logging.warning(f"Skipped {episode_dir.name}: insufficient frames after alignment (only {max_aligned})")
-        return None
+    nf1 = info0.get('nb_frames', 0)
+    nf2 = info1.get('nb_frames', 0)
+    logging.info(f"nf1: {nf1}, nf2: {nf2}")
+    # available_frames = min(info0.get('nb_frames', 0), info1.get('nb_frames', 0))
+    # logging.info(f"available frames: {available_frames}")
+    # max_aligned = min(len(joints), available_frames)
+    # if max_aligned <= 1:
+    #     logging.warning(f"Skipped {episode_dir.name}: insufficient frames after alignment (only {max_aligned})")
+    #     return None
     
     # Skip first frame and align
-    use_num = max_aligned - 1
-    joints = joints[:max_aligned][1:]
-    grippers = grippers[:max_aligned][1:]
     
-    ep_data.fps = float(info0.get('fps', 0.0)) or (50.0/3.0)
+    # use_num = max_aligned - 1
+    # joints = joints[:max_aligned][1:]
+    # grippers = grippers[:max_aligned][1:]
+    # joints = joints[1:]
+    # grippers = grippers[1:]
+    
+    # indices = np.linspace(0, len(joints) - 1, max_aligned).astype(int)
+    # joints = joints[indices]
+    # grippers = grippers[indices]
+    
+    
+    ep_data.fps = info0.get('fps', fps_rational)
+    # or (50.0/3.0)
     # (o_0, a_1), so skip a_0
-    ep_data.num_frames = use_num - 1
-    
+    ep_data.num_frames = len(joints) - 1
+    logging.info(f"nf1: {nf1}, nf2: {nf2}, ep_data.num_frames {ep_data.num_frames}")
+    if ep_data.num_frames != nf1:
+        logging.info("----- no equal")
     # Generate timestamps
-    timestamps = (np.arange(use_num, dtype=np.float32) / np.float32(ep_data.fps))
+    timestamps = (np.arange(ep_data.num_frames, dtype=np.float32) / np.float32(ep_data.fps))
     
     # Build observations and actions (both are 7D: joint + gripper)
-    for frame_idx in range(use_num - 1):
+    for frame_idx in range(ep_data.num_frames):
         # 7D state: 6 joint angles + 1 gripper
         state7 = np.concatenate([joints[frame_idx], [grippers[frame_idx]]], dtype=np.float32)
         # 7D action: same as state
         action7 = np.concatenate([joints[frame_idx+1], [grippers[frame_idx+1]]], dtype=np.float32)
-        
+        # print()
+        # logging.info(f'frame_idx {frame_idx}')
         ep_data.observations.append(state7)
         ep_data.actions.append(action7)
         ep_data.timestamps.append(float(timestamps[frame_idx]))
@@ -327,6 +464,7 @@ def write_combined_data_file(episodes: List[EpisodeData], output_dir: Path, chun
     
     for idx, ep_data in enumerate(episodes):
         for i in range(ep_data.num_frames):
+            # print('idx', idx, 'i', i, 'ep_data', ep_data.episode_dir, ep_data.episode_index)
             record = {
                 'observation.state': ep_data.observations[i].tolist(),
                 'action': ep_data.actions[i].tolist(),
@@ -681,9 +819,10 @@ def convert_abb_to_lerobot_v30(
         {'task_index': [0]},
         index=[tasks]
     )
+    
     tasks_path = output_dir / 'meta' / 'tasks.parquet'
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
-    df_tasks.to_parquet(tasks_path, index=False)
+    df_tasks.to_parquet(tasks_path)
     logging.info(f"Written tasks metadata to {tasks_path}")
     
     # Get video info from first episode
@@ -816,8 +955,8 @@ if __name__ == '__main__':
     parser.add_argument(
         '--fps',
         type=str,
-        default='50/3',
-        help='Target FPS as rational number (default: 50/3 ≈ 16.67 fps)'
+        default='25',
+        help='Target FPS as rational number (default: 25 fps)'
     )
     parser.add_argument(
         '--data-file-size',
@@ -835,7 +974,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--task',
         type=str,
-        default=r"Pick up blocks from conveyor belt and place them in boxes"
+        default=r"Pick up the box on the conveyor belt and place it into the blue plastic bin."
     )
 
     args = parser.parse_args()
