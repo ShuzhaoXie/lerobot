@@ -6,7 +6,7 @@ Combines logic from abb->v2.0 and v2.1->v3.0 conversion scripts.
 Fixed version:
 1. Correct stats.json format
 2. Continuous episode indices (re-indexed after dropping invalid episodes)
-3. Both action and state are 6D joint values
+3. Both action and state are 6D joint values (NO gripper)
 """
 
 import os
@@ -34,11 +34,9 @@ DEFAULT_DATA_PATH = "data/chunk-{chunk_index:03d}/file_{file_index:03d}.parquet"
 DEFAULT_VIDEO_PATH = "videos/{video_key}/chunk-{chunk_index:03d}/file_{file_index:03d}.mp4"
 
 
-# if dataset_type: joint6
-OBS_NAMES=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'gripper']
-ACTION_NAMES=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'gripper']
-# dataset_type: full14
-# OBS_NAMES=['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6',  'gripper']
+# ✅ 修改1: 改为6维，去掉gripper
+OBS_NAMES = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6']
+ACTION_NAMES = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6']
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -158,57 +156,37 @@ def get_file_size_in_mb(path: Path) -> float:
     return path.stat().st_size / (1024 * 1024)
 
 
+# ✅ 修改2: parse_action_states 只返回joint，不需要gripper了
 def parse_action_states(action_json_path: Path) -> List[Dict]:
     """Parse states list from action.json."""
     with open(action_json_path, 'r') as f:
         data = json.load(f)
     states = data.get('states', [])
     tt = data.get('time', [])
-    # logging.info(f'times {len(tt)} {len(states)}')
     result: List[Dict] = []
     
     for i, st in enumerate(states):
         if not isinstance(st, dict):
             result.append({
                 'joint': None,
-                'gripper': None,
                 'time': tt[i]
             })
             continue
         joint = st.get('joint')
-        gripper = st.get('gripper')
         
         if joint is None or (not isinstance(joint, list)) or len(joint) != 6:
             result.append({
                 'joint': None,
-                'gripper': None,
                 'time': tt[i]
             })
             continue
-        
-        # Parse gripper: "on" -> 1.0, "off" -> 0.0
-        # TODO, maybe the "None" dose not mean the ``off gripper``
-        if gripper is None:
-            g = 0.0
-        elif isinstance(gripper, str):
-            g = 1.0 if gripper.lower() == 'on' else 0.0
-        else:
-            try:
-                g = float(gripper)
-            except Exception:
-                g = 0.0
             
         result.append({
             'joint': np.array(list(map(float, joint)), dtype=np.float32),
-            'gripper': g,
             'time': tt[i]
         })
     return result
 
-# GPT 说有更快方法
-# ffmpeg -i cam_0.mp4 \
-#     -vf "select='not(in(n\,3\,4\,8\,13))',scale=448:448" \
-#     -c:v libx264 -preset fast -pix_fmt yuv420p -y cam0_temp.mp4
 
 def count_frames(path):
     cmd = [
@@ -220,23 +198,21 @@ def count_frames(path):
     data = json.loads(output)
     return int(data['streams'][0]['nb_read_frames'])
 
+
 def filter_and_save_video(src_path, dst_path, delete_ids, fps):
-    # 自动创建临时目录，任务完成后自动删除
     frame_duration = 1.0 / float(fps)
     with tempfile.TemporaryDirectory(prefix="frames_") as frame_dir:
         print(f"创建临时目录: {frame_dir}")
 
-        # 1) 强制导出帧（已包含缩放）
         subprocess.run([
             "ffmpeg", "-i", src_path, 
-            "-vf", "scale=448:448",  # 在导出时缩放
+            "-vf", "scale=448:448",
             "-vsync", "cfr", 
             "-qscale:v", "1", 
             f"{frame_dir}/%06d.png", 
             "-y"
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
-        # 2) 检查帧是否导出
         files = sorted(f for f in os.listdir(frame_dir) if f.endswith(".png"))
         print(f"导出的帧数量: {len(files)} {files[0]}")
 
@@ -246,16 +222,13 @@ def filter_and_save_video(src_path, dst_path, delete_ids, fps):
         
         total_frames = len(files)
 
-        # 3) 写 concat list（过滤要删除的帧）
         list_file = os.path.join(frame_dir, "file_list.txt")
         with open(list_file, "w") as f:
             for i in range(total_frames):
-                if i not in delete_ids:  # 注意：帧编号从1开始
+                if i not in delete_ids:
                     f.write(f"file '{frame_dir}/{(i+1):06d}.png'\n")
                     f.write(f"duration {frame_duration:.8f}\n")
 
-#             "-vf", f"fps={fps}",  # 确保帧率一致
-        # 4) 使用文件列表重新生成视频
         subprocess.run([
             "ffmpeg",
             "-f", "concat",
@@ -270,35 +243,26 @@ def filter_and_save_video(src_path, dst_path, delete_ids, fps):
         
         print(f"✅ 视频处理完成：{dst_path}")
 
-     
 
 class EpisodeData:
     """Container for episode data."""
     def __init__(self, episode_index: int, episode_dir: Path):
-        self.episode_index = episode_index  # This will be the NEW continuous index
+        self.episode_index = episode_index
         self.episode_dir = episode_dir
         self.states_data = []
         self.cam0_temp_path = None
         self.cam1_temp_path = None
         self.num_frames = 0
         self.fps = 0.0
-        self.observations = []  # 6D joint state
-        self.actions = []       # 6D joint action (same as state, or shifted)
+        self.observations = []  # ✅ 6D joint state (no gripper)
+        self.actions = []       # ✅ 6D joint action (no gripper)
         self.timestamps = []
-        
+
 
 def process_raw_episode(episode_dir: Path, episode_index: int, temp_dir: Path, fps_rational: str) -> EpisodeData:
-    """Process a single raw episode directory.
-    
-    Args:
-        episode_dir: Path to the raw episode directory
-        episode_index: The NEW continuous index for this episode
-        temp_dir: Temporary directory for re-encoded videos
-        fps_rational: Target FPS as rational number
-    """
+    """Process a single raw episode directory."""
     ep_data = EpisodeData(episode_index, episode_dir)
     
-    # Find video files
     action_json = episode_dir / 'action.json'
     
     if not action_json.exists():
@@ -325,7 +289,6 @@ def process_raw_episode(episode_dir: Path, episode_index: int, temp_dir: Path, f
         logging.warning(f"Skipped {episode_dir.name}: missing cam1 video (kinect.mp4 or cam_1.mp4)")
         return None
     
-    # Parse action states
     try:
         raw_states_data = parse_action_states(action_json)
     except Exception as e:
@@ -343,7 +306,6 @@ def process_raw_episode(episode_dir: Path, episode_index: int, temp_dir: Path, f
         assert c0_count == len(raw_states_data) and c1_count == c0_count
     except:
         logging.debug(f"name: {episode_dir.name}, count: {c0_count}, lenraw: {len(raw_states_data)}")
-    # logging.info(f'len raw_states_data {len(raw_states_data)}')
     
     states_data = []
     delete_ids = []
@@ -360,44 +322,23 @@ def process_raw_episode(episode_dir: Path, episode_index: int, temp_dir: Path, f
         else:
             states_data.append(st)
             last_i = i
-    # Drop the last frame, as we only use the action of the last frame.
     assert last_i != -1
     delete_ids.append(last_i)
     delete_ids = list(set(sorted(delete_ids)))
     
-    
-    
     logging.info(f"delete_ids, {delete_ids}")
-    # Extract joints and grippers
     logging.info(f'len(states_data) {len(states_data)}')
+    
+    # ✅ 修改3: 只提取joints，不需要grippers
     joints = [state['joint'] for state in states_data]
     logging.info(f'len(joints) {len(joints)}')
-    grippers = [state['gripper'] for state in states_data]
     
-    # Log gripper distribution for debugging
-    
-    
-    # on_count = sum(1 for g in grippers if g == 1.0)
-    # off_count = sum(1 for g in grippers if g == 0.0)
-    # logging.debug(f"{episode_dir.name}: gripper on={on_count}, off={off_count}")
-    
-    # Re-encode videos to temp directory
     ep_data.cam0_temp_path = temp_dir / f'cam0_ep{episode_index:06d}.mp4'
     ep_data.cam1_temp_path = temp_dir / f'cam1_ep{episode_index:06d}.mp4'
     
-    #  把cam_0和cam_1里帧序号（从0开始）在delete_ids（也是从0开始）里的帧删除，并且rescale视频到448x448，'-c:v', 'libx264',
     filter_and_save_video(cam0_in, ep_data.cam0_temp_path, delete_ids, fps_rational)
     filter_and_save_video(cam1_in, ep_data.cam1_temp_path, delete_ids, fps_rational)
     
-    # logging.info(f"c0_count: {c0_count}, c1_count: {c1_count}")
-    # if not run_ffmpeg_reencode(cam0_in, ep_data.cam0_temp_path, fps_rational):
-    #     logging.warning(f"Skipped {episode_dir.name}: failed to re-encode cam0 video")
-    #     return None
-    # if not run_ffmpeg_reencode(cam1_in, ep_data.cam1_temp_path, fps_rational):
-    #     logging.warning(f"Skipped {episode_dir.name}: failed to re-encode cam1 video")
-    #     return None
-    
-    # Get video info
     try:
         info0 = get_video_info(ep_data.cam0_temp_path)
         info1 = get_video_info(ep_data.cam1_temp_path)
@@ -406,50 +347,27 @@ def process_raw_episode(episode_dir: Path, episode_index: int, temp_dir: Path, f
         return None
     
     logging.info(f'joints: {len(joints)}')
-    # Align frames (skip first frame as in original script)
     nf1 = info0.get('nb_frames', 0)
     nf2 = info1.get('nb_frames', 0)
     logging.info(f"nf1: {nf1}, nf2: {nf2}")
-    # available_frames = min(info0.get('nb_frames', 0), info1.get('nb_frames', 0))
-    # logging.info(f"available frames: {available_frames}")
-    # max_aligned = min(len(joints), available_frames)
-    # if max_aligned <= 1:
-    #     logging.warning(f"Skipped {episode_dir.name}: insufficient frames after alignment (only {max_aligned})")
-    #     return None
-    
-    # Skip first frame and align
-    
-    # use_num = max_aligned - 1
-    # joints = joints[:max_aligned][1:]
-    # grippers = grippers[:max_aligned][1:]
-    # joints = joints[1:]
-    # grippers = grippers[1:]
-    
-    # indices = np.linspace(0, len(joints) - 1, max_aligned).astype(int)
-    # joints = joints[indices]
-    # grippers = grippers[indices]
-    
     
     ep_data.fps = info0.get('fps', fps_rational)
-    # or (50.0/3.0)
-    # (o_0, a_1), so skip a_0
     ep_data.num_frames = len(joints) - 1
     logging.info(f"nf1: {nf1}, nf2: {nf2}, ep_data.num_frames {ep_data.num_frames}")
     if ep_data.num_frames != nf1:
         logging.info("----- no equal")
-    # Generate timestamps
+    
     timestamps = (np.arange(ep_data.num_frames, dtype=np.float32) / np.float32(ep_data.fps))
     
-    # Build observations and actions (both are 7D: joint + gripper)
+    # ✅ 修改4: 构建6D observation和action（不含gripper）
     for frame_idx in range(ep_data.num_frames):
-        # 7D state: 6 joint angles + 1 gripper
-        state7 = np.concatenate([joints[frame_idx], [grippers[frame_idx]]], dtype=np.float32)
-        # 7D action: same as state
-        action7 = np.concatenate([joints[frame_idx+1], [grippers[frame_idx+1]]], dtype=np.float32)
-        # print()
-        # logging.info(f'frame_idx {frame_idx}')
-        ep_data.observations.append(state7)
-        ep_data.actions.append(action7)
+        # 6D state: 只有6个关节角度
+        state6 = joints[frame_idx].astype(np.float32)  # 已经是6维的np.array
+        # 6D action: 下一帧的关节角度
+        action6 = joints[frame_idx + 1].astype(np.float32)
+        
+        ep_data.observations.append(state6)
+        ep_data.actions.append(action6)
         ep_data.timestamps.append(float(timestamps[frame_idx]))
     
     logging.info(f"✓ Processed {episode_dir.name} -> episode_{episode_index}: {ep_data.num_frames} frames @ {ep_data.fps:.2f} fps")
@@ -460,11 +378,8 @@ def write_combined_data_file(episodes: List[EpisodeData], output_dir: Path, chun
     """Write combined data file for multiple episodes."""
     all_records = []
     
-    # jsonl_path = "episode0.jsonl"   # 你想写入的路径
-    
     for idx, ep_data in enumerate(episodes):
         for i in range(ep_data.num_frames):
-            # print('idx', idx, 'i', i, 'ep_data', ep_data.episode_dir, ep_data.episode_index)
             record = {
                 'observation.state': ep_data.observations[i].tolist(),
                 'action': ep_data.actions[i].tolist(),
@@ -474,9 +389,6 @@ def write_combined_data_file(episodes: List[EpisodeData], output_dir: Path, chun
                 'index': global_frame_offset + i,
                 'task_index': 0
             }
-            # if idx == 0:
-            #     with open(jsonl_path, "a") as f1:
-            #         f1.write(json.dumps(record) + "\n")
             all_records.append(record)
         global_frame_offset += ep_data.num_frames
     
@@ -489,10 +401,7 @@ def write_combined_data_file(episodes: List[EpisodeData], output_dir: Path, chun
 
 
 def write_combined_video_file(episodes: List[EpisodeData], output_dir: Path, camera_key: str, chunk_idx: int, file_idx: int):
-    """Write combined video file for multiple episodes.
-    
-    camera_key should be the full feature key like 'observation.images.cam_0'
-    """
+    """Write combined video file for multiple episodes."""
     video_paths = []
     for ep_data in episodes:
         if 'cam_0' in camera_key:
@@ -548,10 +457,9 @@ def compute_global_stats(all_observations: List[np.ndarray], all_actions: List[n
             'min': act_arr.min(axis=0).tolist(),
             'max': act_arr.max(axis=0).tolist(),
         },
-        # Image features need stats entries too (using standard image normalization values)
         'observation.images.cam_0': {
-            'mean': [[[0.485]], [[0.456]], [[0.406]]],  # ImageNet mean (C, 1, 1)
-            'std': [[[0.229]], [[0.224]], [[0.225]]],   # ImageNet std (C, 1, 1)
+            'mean': [[[0.485]], [[0.456]], [[0.406]]],
+            'std': [[[0.229]], [[0.224]], [[0.225]]],
             'min': [[[0.0]], [[0.0]], [[0.0]]],
             'max': [[[1.0]], [[1.0]], [[1.0]]],
         },
@@ -594,40 +502,29 @@ def convert_abb_to_lerobot_v30(
     
     logging.info(f"Converting ABB raw data from {raw_data_dir} to LeRobot v3.0 at {output_dir}")
     
-    # Clean output directory
     if output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create temp directory for re-encoded videos
     temp_dir = output_dir / '_temp_videos'
     temp_dir.mkdir(parents=True, exist_ok=True)
     
-    # Find all episode directories
-    # Support two modes:
-    # 1. If input dir itself is an episode (contains action.json), process it as single episode
-    # 2. If input dir contains subdirectories, treat each subdir as an episode
-    
     if (raw_data_dir / 'action.json').exists():
-        # Mode 1: Input is a single episode directory
         episode_dirs = [raw_data_dir]
         logging.info(f"Input directory is a single episode (contains action.json)")
     else:
-        # Mode 2: Input contains multiple episode subdirectories
         episode_dirs = sorted([d for d in raw_data_dir.iterdir() if d.is_dir()], key=lambda p: p.name)
     
     logging.info(f"Found {len(episode_dirs)} episode directories")
     
-    # Process all episodes with CONTINUOUS indexing
     all_episodes = []
-    continuous_index = 0  # This will be the new continuous episode index
+    continuous_index = 0
     
     for episode_dir in tqdm.tqdm(episode_dirs, desc="Processing episodes"):
-        # Pass the continuous_index as the episode_index
         ep_data = process_raw_episode(episode_dir, continuous_index, temp_dir, fps_rational)
         if ep_data is not None:
             all_episodes.append(ep_data)
-            continuous_index += 1  # Only increment when episode is successfully processed
+            continuous_index += 1
     
     if len(all_episodes) == 0:
         logging.error("No valid episodes found!")
@@ -641,7 +538,6 @@ def convert_abb_to_lerobot_v30(
     logging.info(f"{'='*60}")
     logging.info("")
     
-    # Organize episodes into data/video files based on size limits
     data_file_episodes = []
     cam0_video_file_episodes = []
     cam1_video_file_episodes = []
@@ -655,14 +551,12 @@ def convert_abb_to_lerobot_v30(
     current_cam1_episodes = []
     current_cam1_size = 0
     
-    # Estimate sizes
     for ep_data in all_episodes:
-        # Estimate data size (rough: 8 bytes per float * 12 features * num_frames / 1MB)
+        # ✅ 修改5: 估算大小时用6维（原来是12 = 6*2，现在仍然是6*2=12，但每个是6维不是7维）
         est_data_size = (ep_data.num_frames * 12 * 8) / (1024 * 1024)
         cam0_size = get_file_size_in_mb(ep_data.cam0_temp_path)
         cam1_size = get_file_size_in_mb(ep_data.cam1_temp_path)
         
-        # Group for data files
         if current_data_size + est_data_size >= data_file_size_in_mb and len(current_data_episodes) > 0:
             data_file_episodes.append(current_data_episodes)
             current_data_episodes = []
@@ -670,7 +564,6 @@ def convert_abb_to_lerobot_v30(
         current_data_episodes.append(ep_data)
         current_data_size += est_data_size
         
-        # Group for cam0 video files
         if current_cam0_size + cam0_size >= video_file_size_in_mb and len(current_cam0_episodes) > 0:
             cam0_video_file_episodes.append(current_cam0_episodes)
             current_cam0_episodes = []
@@ -678,7 +571,6 @@ def convert_abb_to_lerobot_v30(
         current_cam0_episodes.append(ep_data)
         current_cam0_size += cam0_size
         
-        # Group for cam1 video files
         if current_cam1_size + cam1_size >= video_file_size_in_mb and len(current_cam1_episodes) > 0:
             cam1_video_file_episodes.append(current_cam1_episodes)
             current_cam1_episodes = []
@@ -686,7 +578,6 @@ def convert_abb_to_lerobot_v30(
         current_cam1_episodes.append(ep_data)
         current_cam1_size += cam1_size
     
-    # Add remaining episodes
     if current_data_episodes:
         data_file_episodes.append(current_data_episodes)
     if current_cam0_episodes:
@@ -698,7 +589,6 @@ def convert_abb_to_lerobot_v30(
                  f"{len(cam0_video_file_episodes)} cam0 video files, "
                  f"{len(cam1_video_file_episodes)} cam1 video files")
     
-    # Write data files
     global_frame_offset = 0
     episode_metadata = {}
     
@@ -716,11 +606,9 @@ def convert_abb_to_lerobot_v30(
             }
             global_frame_offset += ep_data.num_frames
         
-        # Reset global_frame_offset for write function
         start_offset = episode_metadata[episodes[0].episode_index]['dataset_from_index']
         write_combined_data_file(episodes, output_dir, chunk_idx, file_idx_in_chunk, start_offset)
     
-    # Write video files for cam0
     cam0_key = 'observation.images.cam_0'
     for file_idx, episodes in enumerate(tqdm.tqdm(cam0_video_file_episodes, desc="Writing cam0 videos")):
         chunk_idx = file_idx // DEFAULT_CHUNK_SIZE
@@ -729,7 +617,6 @@ def convert_abb_to_lerobot_v30(
         if not write_combined_video_file(episodes, output_dir, cam0_key, chunk_idx, file_idx_in_chunk):
             logging.error(f"Failed to write cam0 video file {chunk_idx}/{file_idx_in_chunk}")
         
-        # Calculate timestamps for each episode in this video file
         cumulative_duration = 0.0
         for ep_data in episodes:
             ep_duration = ep_data.num_frames / ep_data.fps
@@ -741,7 +628,6 @@ def convert_abb_to_lerobot_v30(
             })
             cumulative_duration += ep_duration
     
-    # Write video files for cam1
     cam1_key = 'observation.images.cam_1'
     for file_idx, episodes in enumerate(tqdm.tqdm(cam1_video_file_episodes, desc="Writing cam1 videos")):
         chunk_idx = file_idx // DEFAULT_CHUNK_SIZE
@@ -750,7 +636,6 @@ def convert_abb_to_lerobot_v30(
         if not write_combined_video_file(episodes, output_dir, cam1_key, chunk_idx, file_idx_in_chunk):
             logging.error(f"Failed to write cam1 video file {chunk_idx}/{file_idx_in_chunk}")
         
-        # Calculate timestamps for each episode in this video file
         cumulative_duration = 0.0
         for ep_data in episodes:
             ep_duration = ep_data.num_frames / ep_data.fps
@@ -762,26 +647,21 @@ def convert_abb_to_lerobot_v30(
             })
             cumulative_duration += ep_duration
     
-    # Clean up temp directory
     shutil.rmtree(temp_dir)
     
-    # Collect all observations and actions for global stats
     all_observations = []
     all_actions = []
     for ep_data in all_episodes:
         all_observations.extend(ep_data.observations)
         all_actions.extend(ep_data.actions)
     
-    # Compute global statistics
     global_stats = compute_global_stats(all_observations, all_actions)
     
-    # Compute per-episode statistics
     all_episode_stats = []
     for ep_data in all_episodes:
         ep_stats = compute_episode_stats(ep_data.observations, ep_data.actions)
         all_episode_stats.append(ep_stats)
     
-    # Write episodes metadata
     episodes_records = []
     for idx, ep_data in enumerate(all_episodes):
         ep_idx = ep_data.episode_index
@@ -801,20 +681,17 @@ def convert_abb_to_lerobot_v30(
     df_episodes.to_parquet(episodes_path, index=False)
     logging.info(f"Written episodes metadata to {episodes_path}")
     
-    # Write stats.json (correct format)
     stats_json_path = output_dir / 'meta' / 'stats.json'
     stats_json_path.parent.mkdir(parents=True, exist_ok=True)
     with open(stats_json_path, 'w') as f:
         json.dump(global_stats, f, indent=2)
     logging.info(f"Written stats.json to {stats_json_path}")
     
-    # Also write stats.parquet for compatibility
     df_stats = pd.DataFrame([flatten_dict(global_stats)])
     stats_parquet_path = output_dir / 'meta' / 'stats.parquet'
     df_stats.to_parquet(stats_parquet_path, index=False)
     logging.info(f"Written stats.parquet to {stats_parquet_path}")
     
-    # Write tasks metadata
     df_tasks = pd.DataFrame(
         {'task_index': [0]},
         index=[tasks]
@@ -825,13 +702,13 @@ def convert_abb_to_lerobot_v30(
     df_tasks.to_parquet(tasks_path)
     logging.info(f"Written tasks metadata to {tasks_path}")
     
-    # Get video info from first episode
     first_video_path = output_dir / DEFAULT_VIDEO_PATH.format(
         video_key='observation.images.cam_0', chunk_index=0, file_index=0)
     video_info = get_video_info(first_video_path)
     
-    # Write info.json
     total_frames = sum(ep.num_frames for ep in all_episodes)
+    
+    # ✅ 修改6: info.json中的features改为6维
     info = {
         'codebase_version': CODEBASE_VERSION,
         'robot_type': 'abb_robot',
@@ -849,13 +726,13 @@ def convert_abb_to_lerobot_v30(
         'features': {
             'observation.state': {
                 'dtype': 'float32',
-                'shape': [7],
-                'names': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'gripper'],
+                'shape': [6],  # ✅ 改为6
+                'names': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6'],  # ✅ 去掉gripper
             },
             'action': {
                 'dtype': 'float32',
-                'shape': [7],
-                'names': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'gripper'],
+                'shape': [6],  # ✅ 改为6
+                'names': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6'],  # ✅ 去掉gripper
             },
             'observation.images.cam_0': {
                 'dtype': 'video',
@@ -930,8 +807,8 @@ def convert_abb_to_lerobot_v30(
     logging.info(f"  Total frames: {total_frames}")
     logging.info(f"  FPS: {int(video_info['fps'])}")
     logging.info(f"  Resolution: {video_info['width']}x{video_info['height']}")
-    logging.info(f"  State dim: 7 (joint + gripper)")
-    logging.info(f"  Action dim: 7 (joint + gripper)")
+    logging.info(f"  State dim: 6 (joint only, no gripper)")  # ✅ 更新日志
+    logging.info(f"  Action dim: 6 (joint only, no gripper)")  # ✅ 更新日志
     logging.info(f"  Output directory: {output_dir}")
     logging.info(f"{'='*60}")
 

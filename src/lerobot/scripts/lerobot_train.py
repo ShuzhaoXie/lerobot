@@ -331,7 +331,6 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         start_time = time.perf_counter()
         batch = next(dl_iter)
         # import pdb; pdb.set_trace()
-        # print('before preprocess, batch')
         # for k, v in batch.items():
         #     if isinstance(v, torch.Tensor):
         #         print(k, v.shape)

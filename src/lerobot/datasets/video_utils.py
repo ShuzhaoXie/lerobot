@@ -256,8 +256,8 @@ def decode_video_frames_torchcodec(
     # convert timestamps to frame indices
     frame_indices = [round(ts * average_fps) for ts in timestamps]
     # retrieve frames based on indices
-    frames_batch = decoder.get_frames_at(indices=frame_indices)
 
+    frames_batch = decoder.get_frames_at(indices=frame_indices)
     for frame, pts in zip(frames_batch.data, frames_batch.pts_seconds, strict=True):
         loaded_frames.append(frame)
         loaded_ts.append(pts.item())
