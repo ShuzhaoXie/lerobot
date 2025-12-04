@@ -355,10 +355,10 @@ class IRB120(Robot):
         # print('here?')
         self.set_joints(joints)
         if action['gripper'] > 0.5:
-            self.set_dio(1, 0)
+            self.set_dio(1, 1)
             gripper_state = 1
         else:
-            self.set_dio(2, 0)
+            self.set_dio(1, 0)
             gripper_state = 0
 
         return action # just return the fucking action
