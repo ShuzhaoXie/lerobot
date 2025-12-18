@@ -75,18 +75,29 @@ class IRB120(Robot):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
-        return {
-            **{f"joint_{i}": float for i in range(1, 7)},
-            "gripper": float,
-            **self._cameras_ft,
-        }
+        if self.config.action_type == "joints_only":
+            return {
+                **{f"joint_{i}": float for i in range(1, 7)},
+                **self._cameras_ft,
+            }
+        else:
+            return {
+                **{f"joint_{i}": float for i in range(1, 7)},
+                "gripper": float,
+                **self._cameras_ft,
+            }
     
     @cached_property
     def action_features(self) -> dict[str, type]:
-        return {
-            **{f"joint_{i}": float for i in range(1, 7)},
-            "gripper": float,
-        }
+        if self.config.action_type == "joints_only":
+            return {
+                **{f"joint_{i}": float for i in range(1, 7)},
+            }
+        else:
+            return {
+                **{f"joint_{i}": float for i in range(1, 7)},
+                "gripper": float,
+            }
 
     @property
     def is_connected(self) -> bool:
@@ -173,7 +184,8 @@ class IRB120(Robot):
         # obs_dict = self.bus.sync_read("Present_Position")
         # obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
         obs_dict = {f"joint_{i+1}": val for i, val in enumerate(obs_list)}
-        obs_dict["gripper"] = float(gripper)
+        if self.config.action_type != "joints_only":
+            obs_dict["gripper"] = float(gripper)
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
@@ -354,12 +366,13 @@ class IRB120(Robot):
             joints.append(float(action[f'joint_{i}']))
         # print('here?')
         self.set_joints(joints)
-        if action['gripper'] > 0.5:
-            self.set_dio(1, 1)
-            gripper_state = 1
-        else:
-            self.set_dio(1, 0)
-            gripper_state = 0
+        if self.config.action_type != "joints_only":
+            if action['gripper'] > 0.5:
+                self.set_dio(1, 1)
+                gripper_state = 1
+            else:
+                self.set_dio(1, 0)
+                gripper_state = 0
 
         return action # just return the fucking action
         # goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}

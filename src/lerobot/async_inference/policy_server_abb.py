@@ -213,6 +213,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         return services_pb2.Empty()
 
+    @torch.no_grad()
     def GetActions(self, request, context):  # noqa: N802
         """Returns actions to the robot client. Actions are sent as a single
         chunk, containing multiple actions."""
@@ -328,7 +329,8 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             chunk = chunk.unsqueeze(0)  # adding batch dimension, now shape is (B, chunk_size, action_dim)
 
         return chunk[:, : self.actions_per_chunk, :]
-
+    
+    @torch.no_grad()
     def _predict_action_chunk(self, observation_t: TimedObservation) -> list[TimedAction]:
         """Predict an action chunk based on an observation.
 
