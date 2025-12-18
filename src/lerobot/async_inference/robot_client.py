@@ -48,6 +48,8 @@ import torch
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from lerobot.cameras.kinectdk.configuration_kinectdk import KinectDKCameraConfig # noqa: F401????
+from lerobot.cameras.gopro.configuration_gopro import GoProCameraConfig
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
@@ -56,7 +58,7 @@ from lerobot.robots import (  # noqa: F401
     make_robot_from_config,
     so100_follower,
     so101_follower,
-    abb_irb120
+    abb_irb120, # fuck, you must import abb_irb120, fuck, By Shuzhao
 )
 from lerobot.transport import (
     services_pb2,  # type: ignore

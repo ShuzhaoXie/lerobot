@@ -247,7 +247,7 @@ class IRB120(Robot):
         Executes a move immediately, from current joint angles,
         to 'joints', in degrees.
         """
-        print("abb_new.py line 77: send the joints info", 'joints (model output)', joints)
+        # print("abb_new.py line 77: send the joints info", 'joints (model output)', joints)
         if len(joints) != 6:
             joints = joints[:6]
         # TODO: something wrong? why # at the end?
@@ -334,13 +334,13 @@ class IRB120(Robot):
         if wait_for_response, we wait for the response and return it
         """
         caller = inspect.stack()[1][3]
-        print('%-14s sending: %s', caller, message)
+        logger.info('%-14s sending: %s', caller, message)
         self.sock.send(message.encode())  # Python 3: 发送字节需编码字符串
         time.sleep(self.delay)
         if not wait_for_response:
             return
         data = self.sock.recv(4096).decode()  # Python 3: 接收字节需解码为字符串
-        print('%-14s received: %s', caller, data)  # Python 3: 修复拼写错误recieved→received
+        logger.info('%-14s received: %s', caller, data)  # Python 3: 修复拼写错误recieved→received
         # print('%-14s received2: %s', caller, data)
         return data
 
@@ -365,14 +365,17 @@ class IRB120(Robot):
         for i in range(1, 7):
             joints.append(float(action[f'joint_{i}']))
         # print('here?')
-        self.set_joints(joints)
+        # gripper first
         if self.config.action_type != "joints_only":
+            # logger.info("set dio")
             if action['gripper'] > 0.5:
                 self.set_dio(1, 1)
                 gripper_state = 1
             else:
                 self.set_dio(1, 0)
                 gripper_state = 0
+        self.set_joints(joints)
+        
 
         return action # just return the fucking action
         # goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}

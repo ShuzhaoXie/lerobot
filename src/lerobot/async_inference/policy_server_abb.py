@@ -61,7 +61,7 @@ from .helpers import (
     observations_similar,
     raw_observation_to_observation,
 )
-
+import gc
 
 class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
     prefix = "policy_server"
@@ -89,7 +89,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy = None
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
-
+        
+        # By Shuzhao Xie
+        self._inference_lock = threading.Lock()  # Add this line
     @property
     def running(self):
         return not self.shutdown_event.is_set()
@@ -221,52 +223,59 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.logger.debug(f"Client {client_id} connected for action streaming")
 
         # Generate action based on the most recent observation and its timestep
-        try:
-            getactions_starts = time.perf_counter()
-            obs = self.observation_queue.get(timeout=self.config.obs_queue_timeout)
-            self.logger.info(
-                f"Running inference for observation #{obs.get_timestep()} (must_go: {obs.must_go})"
-            )
+        with self._inference_lock:
+            try:
+                getactions_starts = time.perf_counter()
+                obs = self.observation_queue.get(timeout=self.config.obs_queue_timeout)
+                self.logger.info(
+                    f"Running inference for observation #{obs.get_timestep()} (must_go: {obs.must_go})"
+                )
 
-            with self._predicted_timesteps_lock:
-                self._predicted_timesteps.add(obs.get_timestep())
-            # self.logger.info(f"SHUZHAO: here come a error?")
-            start_time = time.perf_counter()
-            action_chunk = self._predict_action_chunk(obs)
-            inference_time = time.perf_counter() - start_time
-            # self.logger.info(f"SHUZHAO: here come a error? {type(action_chunk)}")
-            start_time = time.perf_counter()
-            actions_bytes = pickle.dumps(action_chunk)  # nosec
-            serialize_time = time.perf_counter() - start_time
+                with self._predicted_timesteps_lock:
+                    self._predicted_timesteps.add(obs.get_timestep())
+                # self.logger.info(f"SHUZHAO: here come a error?")
+                start_time = time.perf_counter()
+                action_chunk = self._predict_action_chunk(obs)
+                inference_time = time.perf_counter() - start_time
+                # self.logger.info(f"SHUZHAO: here come a error? {type(action_chunk)}")
+                start_time = time.perf_counter()
+                actions_bytes = pickle.dumps(action_chunk)  # nosec
+                serialize_time = time.perf_counter() - start_time
 
-            # Create and return the action chunk
-            actions = services_pb2.Actions(data=actions_bytes)
+                # Create and return the action chunk
+                actions = services_pb2.Actions(data=actions_bytes)
 
-            self.logger.info(
-                f"Action chunk #{obs.get_timestep()} generated | "
-                f"Total time: {(inference_time + serialize_time) * 1000:.2f}ms"
-            )
+                self.logger.info(
+                    f"Action chunk #{obs.get_timestep()} generated | "
+                    f"Total time: {(inference_time + serialize_time) * 1000:.2f}ms"
+                )
 
-            self.logger.debug(
-                f"Action chunk #{obs.get_timestep()} generated | "
-                f"Inference time: {inference_time:.2f}s |"
-                f"Serialize time: {serialize_time:.2f}s |"
-                f"Total time: {inference_time + serialize_time:.2f}s"
-            )
+                self.logger.debug(
+                    f"Action chunk #{obs.get_timestep()} generated | "
+                    f"Inference time: {inference_time:.2f}s |"
+                    f"Serialize time: {serialize_time:.2f}s |"
+                    f"Total time: {inference_time + serialize_time:.2f}s"
+                )
 
-            time.sleep(
-                max(0, self.config.inference_latency - max(0, time.perf_counter() - getactions_starts))
-            )  # sleep controls inference latency
+                time.sleep(
+                    max(0, self.config.inference_latency - max(0, time.perf_counter() - getactions_starts))
+                )  # sleep controls inference latency
 
-            return actions
+                return actions
 
-        except Empty:  # no observation added to queue in obs_queue_timeout
-            return services_pb2.Empty()
+            except Empty:  # no observation added to queue in obs_queue_timeout
+                return services_pb2.Empty()
 
-        except Exception as e:
-            self.logger.error(f"Error in StreamActions: {e}")
+            except Exception as e:
+                self.logger.error(f"Error in StreamActions: {e}")
 
-            return services_pb2.Empty()
+                return services_pb2.Empty()
+            finally:
+
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
 
     def _obs_sanity_checks(self, obs: TimedObservation, previous_obs: TimedObservation) -> bool:
         """Check if the observation is valid to be processed by the policy"""
@@ -392,7 +401,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """5. Convert to TimedAction list"""
         # self.logger.info("5. Convert to TimedAction list")
         action_chunk = self._time_action_chunk(
-            observation_t.get_timestamp(), list(action_tensor), observation_t.get_timestep()
+            observation_t.get_timestamp(), list(action_tensor.cpu()), observation_t.get_timestep()
         )
         postprocess_stops = time.perf_counter()
         postprocessing_time = postprocess_stops - start_postprocess

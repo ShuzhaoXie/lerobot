@@ -402,11 +402,18 @@ class RobotClient:
             self.logger.debug(f"raw_observation: {raw_observation.keys()}")
             with self.latest_action_lock:
                 latest_action = self.latest_action
+            
+            # FIX: Always increment timestep to avoid getting stuck
+            # Use a monotonic counter instead of just latest_action
+            if not hasattr(self, '_observation_counter'):
+                self._observation_counter = 0
+            self._observation_counter += 1
 
             observation = TimedObservation(
                 timestamp=time.time(),  # need time.time() to compare timestamps across client and server
                 observation=raw_observation,
-                timestep=max(latest_action, 0),
+                # timestep=max(latest_action, 0),
+                timestep=self._observation_counter,
             )
 
             obs_capture_time = time.perf_counter() - start_time
