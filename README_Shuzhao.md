@@ -7,7 +7,7 @@ ln -s /mnt/storage/users/szxie_data/abb/data data
 ```
 
 # Data Preprocess
-check `create_dataset_v30_backup.sh`
+check `create_dataset_v30_down.sh`
 
 ## Note for Pi 0.5
 ```
