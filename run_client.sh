@@ -1,7 +1,7 @@
 TASK1="Pick up blocks from conveyor belt and place them in boxes"
 TASK2="Pick up the box on the conveyor belt and place it into the blue plastic bin."
 TASK3="Vacuum pick the box on the conveyor belt and place it into the blue plastic bin."
-
+TASK4="Pick up the box on the conveyor belt and place it into the blue plastic tray."
 
 PI0_CKPT_V2=outputs/pi0_training_joint6/2025_11_30_18_25_53/checkpoints/060000/pretrained_model
 PI05_CKPT_V1=outputs/pi05_training_joint6/2025_11_30_20_24_10/060000/pretrained_model
@@ -17,8 +17,8 @@ python -m lerobot.async_inference.robot_client \
     --robot.port=5000 \
     --robot.id=abb_irb120 \
     --robot.action_type=other \
-    --robot.cameras="{ cam_0: {type: gopro, index_or_path: gopro, width: 448, height: 448, fps: 16}, cam_1: {type: kinectdk, index_or_path: 0, width: 448, height: 448, fps: 30}}" \
-    --task="${TASK2}" \
+    --robot.cameras="{ cam_0: {type: gopro, index_or_path: gopro, width: 448, height: 448, fps: 30}, cam_1: {type: kinectdk, index_or_path: 0, width: 448, height: 448, fps: 30}}" \
+    --task="${TASK4}" \
     --policy_type=pi0 \
     --pretrained_name_or_path=$PI0_CKPT_V4 \
     --policy_device=cuda \
